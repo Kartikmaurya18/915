@@ -62,7 +62,7 @@ def test_vercel_configuration_files_exist():
     pyproject = root / "pyproject.toml"
     assert pyproject.exists(), "pyproject.toml must exist"
     p_content = pyproject.read_text(encoding="utf-8")
-    assert "api/index.py:app" in p_content, "pyproject.toml must declare api/index.py:app as entrypoint"
+    assert 'entrypoint = "api.index:app"' in p_content, "pyproject.toml must declare api.index:app as entrypoint"
 
 
 def test_fastapi_endpoints_reachable_via_vercel_entrypoint():
