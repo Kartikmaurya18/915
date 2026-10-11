@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from src.timeutil import now_ist, to_ist
+
 
 def compute_staleness(
     last_tick_time: datetime | None,
@@ -29,11 +31,12 @@ def compute_staleness(
         return None, True
 
     if now is None:
-        now = datetime.now(last_tick_time.tzinfo) if last_tick_time.tzinfo else datetime.now()
+        now = now_ist()
 
-    # Normalize awareness so subtraction never raises.
+    # Normalize awareness so subtraction never raises. Naive datetimes are
+    # IST wall-clock time by this codebase's convention (see timeutil).
     if last_tick_time.tzinfo is not None and now.tzinfo is None:
-        now = now.astimezone()
+        now = to_ist(now)
     elif last_tick_time.tzinfo is None and now.tzinfo is not None:
         now = now.replace(tzinfo=None)
 

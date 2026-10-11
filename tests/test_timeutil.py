@@ -43,9 +43,15 @@ def test_today_ist_matches_now_ist_date():
 
 
 def test_is_trading_day_flags_weekends():
-    monday = datetime(2026, 9, 14).date()  # confirmed Monday
+    tuesday = datetime(2026, 9, 15).date()
     saturday = datetime(2026, 9, 19).date()
     sunday = datetime(2026, 9, 20).date()
-    assert is_trading_day(monday) is True
+    assert is_trading_day(tuesday) is True
     assert is_trading_day(saturday) is False
     assert is_trading_day(sunday) is False
+
+
+def test_is_trading_day_agrees_with_market_calendar_on_holidays():
+    # 2026-09-14 is a Monday but an NSE holiday (Ganesh Chaturthi) — timeutil
+    # delegates to market_calendar so there is only one trading-day rule.
+    assert is_trading_day(datetime(2026, 9, 14).date()) is False

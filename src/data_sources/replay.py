@@ -16,12 +16,13 @@ from __future__ import annotations
 import math
 import random
 import time
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from src.data_sources.base import DataSource
+from src.data_sources.mock import MOCK_BASE_SPOT
+from src.instruments import get_underlying_spec
 from src.models import PriceTick
 from src.option_chain.expiry import resolve_mock_expiry
+from src.timeutil import now_ist
 
 # Each sequence is a list of cumulative deltas (points) applied to `base_spot`.
 # Deterministic and hand-authored so the resulting spot path is reproducible
@@ -46,6 +47,9 @@ class ReplayDataSource(DataSource):
     - The sequence loops when exhausted so replay mode can run indefinitely.
     """
 
+    provider_name = "REPLAY"
+    is_simulated = True
+
     def __init__(
         self,
         underlying: str = "NIFTY",
@@ -53,13 +57,16 @@ class ReplayDataSource(DataSource):
         timezone: str = "Asia/Kolkata",
         sequence: str = DEFAULT_SEQUENCE,
         speed: float = 1.0,
-        base_spot: float = 24_850.0,
+        base_spot: float | None = None,
         seed: int = 42,
         expiry: str | None = None,
     ):
-        self.underlying = underlying
+        self.underlying = underlying.upper()
         self.poll_interval = poll_interval
-        self.tz = ZoneInfo(timezone)
+        self.timezone = timezone
+        self.spec = get_underlying_spec(self.underlying)
+        if base_spot is None:
+            base_spot = MOCK_BASE_SPOT.get(self.underlying, 24_850.0)
         self.sequence_name = sequence if sequence in REPLAY_SEQUENCES else DEFAULT_SEQUENCE
         self.speed = min(max(float(speed), 0.1), 20.0)
         self.base_spot = base_spot
@@ -84,16 +91,17 @@ class ReplayDataSource(DataSource):
 
     def fetch_option_chain(self) -> dict:
         spot = self._spot
-        atm_strike = round(spot / 50) * 50
+        step = self.spec.strike_step
+        atm_strike = round(spot / step) * step
         strikes = []
         for i in range(-5, 6):
-            strike = atm_strike + i * 50
+            strike = atm_strike + i * step
             distance = abs(strike - spot)
             call_ltp = max(5, 200 - distance * 0.8 + self._rng.uniform(-3, 3))
             put_ltp = max(5, 200 - distance * 0.8 + self._rng.uniform(-3, 3))
 
             signed_distance = strike - spot
-            call_delta = round(1.0 / (1.0 + math.exp(signed_distance / 100.0)), 4)
+            call_delta = round(1.0 / (1.0 + math.exp(signed_distance / (2 * step))), 4)
             put_delta = round(call_delta - 1.0, 4)
 
             strikes.append(
@@ -114,7 +122,7 @@ class ReplayDataSource(DataSource):
                 }
             )
 
-        now = datetime.now(self.tz)
+        now = now_ist(self.timezone)
         return {
             "records": {
                 "underlyingValue": spot,
@@ -124,12 +132,21 @@ class ReplayDataSource(DataSource):
             }
         }
 
+    def list_expiries(self) -> list[str]:
+        return [self.expiry]
+
     def get_underlying_ltp(self) -> float:
         return float(self._spot)
 
     def stream_ticks(self):
         while True:
             spot = self._advance()
-            now = datetime.now(self.tz)
-            yield PriceTick(symbol=self.underlying, price=spot, timestamp=now)
+            now = now_ist(self.timezone)
+            yield PriceTick(
+                symbol=self.underlying,
+                price=spot,
+                timestamp=now,
+                provider=self.provider_name,
+                exchange=self.spec.exchange,
+            )
             time.sleep(self.effective_sleep)

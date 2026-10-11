@@ -8,12 +8,16 @@ import time
 from datetime import datetime
 from typing import Optional
 
-import websockets
-from dhanhq import dhanhq
-from dhanhq.marketfeed import DhanFeed, IDX, Ticker, Quote, Full
+try:
+    from dhanhq import dhanhq
+    from dhanhq.marketfeed import DhanFeed, IDX, Ticker, Quote, Full
+except ImportError:
+    dhanhq = None
+    DhanFeed = IDX = Ticker = Quote = Full = None
 
-from src.data_sources.base import DataSource
-from src.models import PriceTick
+from src.data_sources.base import DataSource, ProviderStatus
+from src.instruments import get_underlying_spec
+from src.models import OptionChainSnapshot, PriceTick
 from src.logging import get_logger
 from src.timeutil import now_ist
 
@@ -26,7 +30,7 @@ def _ensure_env_loaded() -> None:
     root_dir = Path(__file__).resolve().parent.parent.parent
     root_env = root_dir / ".env"
     example_env = root_dir / ".env.example"
-    
+
     # If .env doesn't exist but .env.example exists with credentials, copy/sync
     if not root_env.exists() and example_env.exists():
         try:
@@ -49,38 +53,96 @@ def _ensure_env_loaded() -> None:
     load_dotenv()
 
 
+# Dhan underlying security ids (exchange segment IDX_I for all index
+# underlyings). Verify against Dhan's instrument master
+# (https://images.dhan.co/api-data/api-scrip-master.csv) before enabling a
+# new underlying — an unmapped underlying raises instead of silently
+# streaming NIFTY.
+DHAN_UNDERLYING_IDS: dict[str, int] = {
+    "NIFTY": 13,
+    "BANKNIFTY": 25,
+    "SENSEX": 51,
+}
+
+
+def _unwrap_dhan(payload):
+    """dhanhq wraps every API body as {"status", "remarks", "data": <body>},
+    and the option-chain / expiry-list bodies are themselves {"data": ...,
+    "status": ...}. Descend through `data` until reaching the real content
+    (the dict holding "oc", or the expiry list)."""
+    cur = payload
+    for _ in range(3):
+        if isinstance(cur, dict) and "oc" not in cur and "data" in cur:
+            cur = cur["data"]
+        else:
+            break
+    return cur
+
+
+def _opt_int(value):
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _opt_float(value):
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 class DhanMarketDataProvider(DataSource):
     """
     Live market data provider using DhanHQ API v2.0.2.
-    
+
     Uses WebSocket (DhanFeed v2) for real-time tick data and REST API for option chain.
-    Requires DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN environment variables.
+    Requires DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN environment variables
+    (server-side only — they are never serialized to the frontend).
+
+    Dhan supplies Delta and IV per contract in its option chain; both are
+    mapped straight into the normalized chain (see _normalize_leg).
     """
 
+    provider_name = "DHAN"
+
+    # Kept for backward compatibility; the active underlying's id/segment
+    # are on the instance (self.security_id / self.segment).
     NIFTY_SECURITY_ID = 13
     NIFTY_SEGMENT = "IDX_I"
     NIFTY_SEGMENT_NUM = IDX  # 0 for IDX
-    
+
     OPTION_CHAIN_RATE_LIMIT = 3.0  # seconds between REST requests
-    
+
     def __init__(self, underlying: str = "NIFTY", poll_interval: float = 5.0):
         self.underlying = underlying.upper()
         self.poll_interval = poll_interval
         self._logger = get_logger("INFO")
-        
+        if self.underlying not in DHAN_UNDERLYING_IDS:
+            raise ValueError(
+                f"No Dhan security id mapped for underlying {self.underlying!r}. "
+                f"Mapped: {sorted(DHAN_UNDERLYING_IDS)} (see DHAN_UNDERLYING_IDS in src/data_sources/dhan.py)."
+            )
+        self.security_id = DHAN_UNDERLYING_IDS[self.underlying]
+        self.segment = "IDX_I"
+        self.exchange = get_underlying_spec(self.underlying).exchange
+        self._last_error: str | None = None
+        self._disconnected = False
+
         # Ensure .env file is loaded before reading environment variables
         _ensure_env_loaded()
-        
+
         self._client_id = os.getenv("DHAN_CLIENT_ID")
         self._access_token = os.getenv("DHAN_ACCESS_TOKEN")
-        
+
         client_id_present = bool(
             self._client_id and self._client_id.strip() and self._client_id != "your_client_id_here"
         )
         access_token_present = bool(
             self._access_token and self._access_token.strip() and self._access_token != "your_access_token_here"
         )
-        
+
         # Safe diagnostic reporting (never exposing credential values)
         self._logger.log_system_event(
             "dhan_credential_diagnostic",
@@ -95,9 +157,9 @@ class DhanMarketDataProvider(DataSource):
             raise ValueError(
                 f"DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN environment variables are required for Dhan data source. Diagnostic: [{diag_msg}]"
             )
-        
+
         self.client_id_masked = self._mask_client_id(self._client_id)
-        
+
         # State tracking
         self._is_authenticated = False
         self._is_connected = False
@@ -107,13 +169,14 @@ class DhanMarketDataProvider(DataSource):
         # REST client initialization
         self._dhan: Optional[dhanhq] = None
         self._initialize_rest_client()
-        
+
         # State for option chain caching & expiry
         self._last_chain: dict | None = None
         self._last_chain_fetch_time: float = 0.0
         self._current_expiry: str | None = None
+        self._expiries: list[str] = []
         self._initialize_expiry()
-        
+
         # WebSocket thread management
         self._feed: Optional[DhanFeed] = None
         self._tick_queue: queue.Queue = queue.Queue(maxsize=1000)
@@ -140,6 +203,7 @@ class DhanMarketDataProvider(DataSource):
             )
         except Exception as e:
             self._is_authenticated = False
+            self._last_error = "Dhan authentication failed"
             self._logger.log_error(e, {"context": "dhan_rest_init", "client_id": self.client_id_masked})
             raise ConnectionError(f"Failed to authenticate Dhan client: {e}") from e
 
@@ -149,16 +213,20 @@ class DhanMarketDataProvider(DataSource):
             return
         try:
             expiry_list = self._dhan.expiry_list(
-                under_security_id=self.NIFTY_SECURITY_ID,
-                under_exchange_segment=self.NIFTY_SEGMENT
+                under_security_id=self.security_id,
+                under_exchange_segment=self.segment
             )
-            
-            if isinstance(expiry_list, list) and len(expiry_list) > 0:
-                self._current_expiry = expiry_list[0]
+            expiries = _unwrap_dhan(expiry_list)
+
+            if isinstance(expiries, list) and len(expiries) > 0:
+                self._expiries = [str(e) for e in expiries]
+                self._current_expiry = self._expiries[0]
+                self._last_error = None
                 self._logger.log_system_event("dhan_expiry_set", {"expiry": self._current_expiry})
             elif isinstance(expiry_list, dict) and expiry_list.get("status") == "failure":
-                err_data = str(expiry_list.get("data", {}))
+                err_data = str(expiry_list.get("data", {})) + str(expiry_list.get("remarks", ""))
                 if "808" in err_data or "Authentication Failed" in err_data:
+                    self._last_error = "Dhan authentication failed (808): client id or access token invalid/expired"
                     self._logger.log_system_event(
                         "dhan_auth_error",
                         {
@@ -167,6 +235,7 @@ class DhanMarketDataProvider(DataSource):
                         }
                     )
                 elif "806" in err_data or "Data APIs not Subscribed" in err_data:
+                    self._last_error = "Dhan Data APIs not subscribed (806)"
                     self._logger.log_system_event(
                         "dhan_subscription_error",
                         {
@@ -175,6 +244,7 @@ class DhanMarketDataProvider(DataSource):
                         }
                     )
                 else:
+                    self._last_error = "Dhan expiry list fetch failed"
                     self._logger.log_system_event("dhan_expiry_warning", {"message": f"Expiry fetch failed: {expiry_list}"})
             else:
                 self._logger.log_system_event("dhan_expiry_warning", {"message": "No expiry dates found"})
@@ -188,81 +258,86 @@ class DhanMarketDataProvider(DataSource):
         """
         current_time = time.time()
         time_since_last_fetch = current_time - self._last_chain_fetch_time
-        
+
         if time_since_last_fetch < self.OPTION_CHAIN_RATE_LIMIT:
             sleep_time = self.OPTION_CHAIN_RATE_LIMIT - time_since_last_fetch
             time.sleep(sleep_time)
-        
+
         try:
             if not self._current_expiry:
                 self._initialize_expiry()
                 if not self._current_expiry:
                     raise ValueError("Cannot fetch option chain: no expiry available")
-            
+
             assert self._dhan is not None
             response = self._dhan.option_chain(
-                under_security_id=self.NIFTY_SECURITY_ID,
-                under_exchange_segment=self.NIFTY_SEGMENT,
+                under_security_id=self.security_id,
+                under_exchange_segment=self.segment,
                 expiry=self._current_expiry
             )
-            
+
             self._last_chain_fetch_time = time.time()
             normalized = self._normalize_option_chain(response)
             self._last_chain = normalized
+            self._last_error = None
             return normalized
-            
+
         except Exception as e:
+            self._last_error = f"Dhan option chain fetch failed: {e.__class__.__name__}"
             self._logger.log_error(e, {"context": "dhan_option_chain_fetch"})
             if self._last_chain:
                 return self._last_chain
             raise ConnectionError(f"Dhan option chain fetch failed: {e}") from e
 
+    @staticmethod
+    def _normalize_leg(leg: dict) -> dict:
+        """One Dhan CE/PE object -> the common NSE-style leg dict that
+        parse_option_chain() reads. Only fields Dhan actually sent are
+        populated; absent ones stay None (never a made-up 0)."""
+        greeks = leg.get("greeks") or {}
+        return {
+            "lastPrice": float(leg.get("last_price") or 0.0),
+            "openInterest": _opt_int(leg.get("oi")),
+            "totalTradedVolume": _opt_int(leg.get("volume")),
+            "delta": _opt_float(greeks.get("delta")),
+            "impliedVolatility": _opt_float(leg.get("implied_volatility")),
+            "bidprice": _opt_float(leg.get("top_bid_price")),
+            "askPrice": _opt_float(leg.get("top_ask_price")),
+            "securityId": str(leg["security_id"]) if leg.get("security_id") is not None else None,
+        }
+
     def _normalize_option_chain(self, dhan_response: dict) -> dict:
         """
-        Normalize Dhan option chain response to standard NSE-like format.
+        Map a Dhan option chain response into the common NSE-style
+        interchange dict, which DataSource.get_option_chain() turns into the
+        normalized OptionChainSnapshot — the same path MOCK uses, so nothing
+        downstream has a Dhan-specific branch.
         """
         try:
             if isinstance(dhan_response, dict) and dhan_response.get("status") == "failure":
-                raise ValueError(f"Dhan API option chain failed: {dhan_response.get('data')}")
-            
-            data = dhan_response.get("data", {})
+                raise ValueError(
+                    f"Dhan API option chain failed: {dhan_response.get('remarks') or dhan_response.get('data')}"
+                )
+
+            data = _unwrap_dhan(dhan_response)
+            if not isinstance(data, dict):
+                raise ValueError("Dhan option chain response has no data")
             underlying_ltp = data.get("last_price", 0.0)
-            oc_data = data.get("oc", {})
-            
+            oc_data = data.get("oc", {}) or {}
+
             strikes = []
             for strike_str, strike_data in oc_data.items():
                 try:
                     strike = float(strike_str)
-                    
-                    ce_data = strike_data.get("ce", {})
-                    ce_ltp = float(ce_data.get("last_price", 0.0))
-                    ce_oi = int(ce_data.get("oi", 0))
-                    ce_volume = int(ce_data.get("volume", 0))
-                    
-                    pe_data = strike_data.get("pe", {})
-                    pe_ltp = float(pe_data.get("last_price", 0.0))
-                    pe_oi = int(pe_data.get("oi", 0))
-                    pe_volume = int(pe_data.get("volume", 0))
-                    
-                    if ce_ltp > 0 or pe_ltp > 0:
-                        strikes.append({
-                            "strikePrice": strike,
-                            "CE": {
-                                "lastPrice": ce_ltp,
-                                "openInterest": ce_oi,
-                                "totalTradedVolume": ce_volume,
-                            },
-                            "PE": {
-                                "lastPrice": pe_ltp,
-                                "openInterest": pe_oi,
-                                "totalTradedVolume": pe_volume,
-                            },
-                        })
-                except (ValueError, TypeError):
+                    ce = self._normalize_leg(strike_data.get("ce") or {})
+                    pe = self._normalize_leg(strike_data.get("pe") or {})
+                    if ce["lastPrice"] > 0 or pe["lastPrice"] > 0:
+                        strikes.append({"strikePrice": strike, "CE": ce, "PE": pe})
+                except (ValueError, TypeError, AttributeError):
                     continue
-            
+
             strikes.sort(key=lambda x: x["strikePrice"])
-            
+
             return {
                 "records": {
                     "underlyingValue": float(underlying_ltp),
@@ -271,10 +346,32 @@ class DhanMarketDataProvider(DataSource):
                     "data": strikes,
                 }
             }
-            
+
         except Exception as e:
             self._logger.log_error(e, {"context": "dhan_normalization"})
             raise ValueError(f"Failed to normalize Dhan option chain: {e}") from e
+
+    def get_option_chain(self) -> OptionChainSnapshot:
+        chain = super().get_option_chain()
+        chain.exchange = self.exchange
+        if self._expiries:
+            chain.expiries = list(self._expiries)
+        return chain
+
+    def list_expiries(self) -> list[str]:
+        return list(self._expiries)
+
+    def status(self) -> ProviderStatus:
+        if self._has_received_tick and self._is_connected:
+            return ProviderStatus.LIVE
+        if self._last_error:
+            return ProviderStatus.ERROR
+        if self._disconnected:
+            return ProviderStatus.DISCONNECTED
+        return ProviderStatus.CONNECTING
+
+    def status_detail(self) -> str | None:
+        return self._last_error
 
     def get_underlying_ltp(self) -> float:
         """Return latest underlying LTP."""
@@ -290,7 +387,8 @@ class DhanMarketDataProvider(DataSource):
         Yield PriceTick objects continuously via Dhan WebSocket.
         """
         self._stop_event.clear()
-        
+        self._disconnected = False
+
         # Start WebSocket background thread
         if not self._ws_thread or not self._ws_thread.is_alive():
             self._ws_thread = threading.Thread(
@@ -298,7 +396,7 @@ class DhanMarketDataProvider(DataSource):
                 daemon=True
             )
             self._ws_thread.start()
-        
+
         while not self._stop_event.is_set():
             try:
                 tick = self._tick_queue.get(timeout=1.0)
@@ -319,7 +417,7 @@ class DhanMarketDataProvider(DataSource):
         """Background thread executing async WebSocket event loop."""
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
-        
+
         try:
             self._loop.run_until_complete(self._async_websocket_handler())
         except Exception as e:
@@ -331,8 +429,8 @@ class DhanMarketDataProvider(DataSource):
 
     async def _async_websocket_handler(self) -> None:
         """Async handler for DhanFeed WebSocket connection and continuous tick processing."""
-        instruments = [(self.NIFTY_SEGMENT_NUM, str(self.NIFTY_SECURITY_ID), Ticker)]
-        
+        instruments = [(self.NIFTY_SEGMENT_NUM, str(self.security_id), Ticker)]
+
         retry_delay = 2
         max_retry_delay = 30
 
@@ -342,7 +440,7 @@ class DhanMarketDataProvider(DataSource):
                     "dhan_ws_connecting",
                     {
                         "client_id": self.client_id_masked,
-                        "instruments": f"NIFTY (SecID: {self.NIFTY_SECURITY_ID}, Segment: {self.NIFTY_SEGMENT})",
+                        "instruments": f"{self.underlying} (SecID: {self.security_id}, Segment: {self.segment})",
                         "version": "v2"
                     }
                 )
@@ -357,43 +455,46 @@ class DhanMarketDataProvider(DataSource):
                 await self._feed.connect()
                 self._is_connected = True
                 retry_delay = 2  # reset delay on successful connection
-                
+
                 self._logger.log_system_event(
                     "dhan_ws_connected",
                     {
                         "status": "connected",
                         "client_id": self.client_id_masked,
-                        "subscribed_symbols": ["NIFTY 50 Index"]
+                        "subscribed_symbols": [self.underlying]
                     }
                 )
 
                 # Continuous receive loop
                 while not self._stop_event.is_set():
                     data = await self._feed.get_instrument_data()
-                    
+
                     if getattr(self._feed, "on_close", False):
                         self._logger.log_system_event("dhan_ws_closed_by_server", {"status": "disconnected"})
                         self._is_connected = False
                         break
-                    
+
                     if data and isinstance(data, dict):
                         ltp_val = data.get("LTP") or data.get("last_price")
                         if ltp_val is not None:
                             try:
                                 price = float(ltp_val)
-                                sec_id = str(data.get("security_id", self.NIFTY_SECURITY_ID))
+                                sec_id = str(data.get("security_id", self.security_id))
                                 ltt = str(data.get("LTT", ""))
                                 tick_ts = now_ist()
-                                
+
                                 tick = PriceTick(
                                     symbol=self.underlying,
                                     price=price,
-                                    timestamp=tick_ts
+                                    timestamp=tick_ts,
+                                    provider=self.provider_name,
+                                    exchange=self.exchange,
+                                    instrument_id=sec_id,
                                 )
-                                
+
                                 self._latest_tick = tick
                                 self._has_received_tick = True
-                                
+
                                 self._logger.log_price_tick(
                                     tick,
                                     {
@@ -404,7 +505,7 @@ class DhanMarketDataProvider(DataSource):
                                         "connected": True
                                     }
                                 )
-                                
+
                                 try:
                                     self._tick_queue.put_nowait(tick)
                                 except queue.Full:
@@ -426,6 +527,7 @@ class DhanMarketDataProvider(DataSource):
     def disconnect(self) -> None:
         """Clean disconnect of Dhan WebSocket connection."""
         self._stop_event.set()
+        self._disconnected = True
         try:
             self._tick_queue.put_nowait(None)
         except queue.Full:

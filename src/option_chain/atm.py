@@ -2,15 +2,32 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from src.models import ATMResult, OptionChainSnapshot, OptionLeg
-from src.timeutil import now_ist
+from src.instruments import get_underlying_spec
+from src.models import GREEKS_FROM_PROVIDER, ATMResult, OptionChainSnapshot, OptionLeg
+from src.timeutil import now_ist, to_ist
+
+
+def _opt_float(value) -> float | None:
+    """A provider-supplied optional number, or None — never a made-up 0."""
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def parse_option_chain(raw: dict, underlying: str) -> OptionChainSnapshot:
-    """Parse NSE-style option chain JSON into structured snapshot."""
+    """
+    Adapter: NSE-style option chain JSON (`records.data[].CE/PE`, the shape
+    MOCK, Replay and NSE produce) -> normalized OptionChainSnapshot.
+
+    Optional fields (OI, volume, delta, IV, bid/ask) are copied only when
+    the payload actually has them; otherwise they stay None.
+    """
     records = raw.get("records", {})
     spot = float(records.get("underlyingValue", 0))
-    expiry_dates = records.get("expiryDates", [])
+    expiry_dates = [e for e in records.get("expiryDates", []) if e]
     expiry = expiry_dates[0] if expiry_dates else ""
 
     strikes: list[OptionLeg] = []
@@ -29,14 +46,31 @@ def parse_option_chain(raw: dict, underlying: str) -> OptionChainSnapshot:
                 put_volume=pe.get("totalTradedVolume"),
                 call_delta=ce.get("delta"),
                 put_delta=pe.get("delta"),
+                call_iv=_opt_float(ce.get("impliedVolatility")),
+                put_iv=_opt_float(pe.get("impliedVolatility")),
+                call_bid=_opt_float(ce.get("bidprice")),
+                call_ask=_opt_float(ce.get("askPrice")),
+                put_bid=_opt_float(pe.get("bidprice")),
+                put_ask=_opt_float(pe.get("askPrice")),
             )
         )
 
     timestamp_str = records.get("timestamp", "")
     try:
-        ts = datetime.strptime(timestamp_str, "%d-%b-%Y %H:%M:%S")
+        # Exchange wall-clock strings are IST by convention (see timeutil).
+        ts = to_ist(datetime.strptime(timestamp_str, "%d-%b-%Y %H:%M:%S"))
     except ValueError:
         ts = now_ist()
+
+    try:
+        exchange = get_underlying_spec(underlying).exchange
+    except ValueError:
+        exchange = None
+
+    has_greeks = any(
+        leg.call_delta is not None or leg.put_delta is not None or leg.call_iv is not None or leg.put_iv is not None
+        for leg in strikes
+    )
 
     return OptionChainSnapshot(
         underlying=underlying,
@@ -44,6 +78,9 @@ def parse_option_chain(raw: dict, underlying: str) -> OptionChainSnapshot:
         expiry=expiry,
         timestamp=ts,
         strikes=strikes,
+        exchange=exchange,
+        expiries=expiry_dates,
+        greeks_source=GREEKS_FROM_PROVIDER if has_greeks else None,
     )
 
 
@@ -114,4 +151,5 @@ def find_atm_strike_delta(
         put_delta=atm_leg.put_delta,
         delta_threshold=delta_threshold,
         price_based_strike=price_based.strike if price_based else None,
+        greeks_source=snapshot.greeks_source,
     )

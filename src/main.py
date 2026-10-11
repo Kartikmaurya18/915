@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 from src.config import load_config
 from src.display import ConsoleDisplay
 from src.engine import MarketEngine
+from src.api.server import app
 
 
 def run(cfg: dict | None = None) -> None:

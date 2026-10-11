@@ -8,23 +8,24 @@ from src.candles import CandleAggregator
 from src.config import load_config
 from src.data_quality import compute_staleness, default_stale_threshold_seconds
 from src.data_sources import (
-    MockDataSource,
-    NSEDataSource,
-    DhanMarketDataProvider,
-    DhanDataSource,
-    ReplayDataSource,
+    PROVIDERS,
     REPLAY_SEQUENCES,
+    ProviderStatus,
+    build_provider,
+    provider_key,
 )
 from src.data_sources.replay import DEFAULT_SEQUENCE
+from src.execution import OrderRequest, build_execution_client
 from src.logging import get_logger
 from src.models import ATMResult, Candle, OptionChainSnapshot, PriceTick
 from src.option_chain import (
     StrikeStraddleCandleEngine,
     find_atm_strike,
     find_atm_strike_delta,
-    parse_option_chain,
 )
+from src.option_chain.greeks import build_greeks_engine
 from src.paper_trading import PaperPosition, PaperTradeConfig, PaperTradingEngine
+from src.risk import EXIT_MANUAL
 from src.persistence import PersistenceStore, ensure_seeded
 from src.price_calculator import get_calculator
 from src.rrg import RRGCalculator, RRGConfig
@@ -40,33 +41,9 @@ from src.timeutil import now_ist, to_ist, today_ist, trading_date_str
 
 
 def build_data_source(cfg: dict):
-    underlying = cfg.get("underlying", "NIFTY")
-    poll = float(cfg.get("poll_interval_seconds", 5))
-    if poll <= 0:
-        raise ValueError("poll_interval_seconds must be greater than zero.")
-    source = cfg.get("data_source", "mock").lower()
-
-    if source == "nse":
-        return NSEDataSource(underlying=underlying, poll_interval=poll)
-    if source == "mock":
-        return MockDataSource(
-            underlying=underlying,
-            poll_interval=poll,
-            timezone=cfg.get("timezone", "Asia/Kolkata"),
-            expiry=cfg.get("expiry"),
-        )
-    if source == "dhan":
-        return DhanDataSource(underlying=underlying, poll_interval=poll)
-    if source == "replay":
-        return ReplayDataSource(
-            underlying=underlying,
-            poll_interval=poll,
-            timezone=cfg.get("timezone", "Asia/Kolkata"),
-            sequence=cfg.get("replay_sequence", DEFAULT_SEQUENCE),
-            speed=float(cfg.get("replay_speed", 1.0)),
-            expiry=cfg.get("expiry"),
-        )
-    raise ValueError(f"Unknown data_source: {source!r}. Use 'nse', 'mock', 'dhan', or 'replay'.")
+    """Backward-compatible alias — provider selection lives in
+    src/data_sources/registry.py."""
+    return build_provider(cfg)
 
 
 UpdateCallback = Callable[[dict], None]
@@ -98,7 +75,11 @@ class MarketEngine:
         # choice — the CE+PE formula itself lives in the price calculator.
         self.candle_price_basis = str(self.cfg.get("candle_price_basis", "underlying")).lower()
 
-        self._source = build_data_source(self.cfg)
+        # Provider selection is centralized in the registry. fail_soft: a
+        # provider that can't start (e.g. Dhan without credentials) yields an
+        # ERROR-status placeholder so the app/UI still load — never MOCK data.
+        self._source = build_provider(self.cfg, fail_soft=True)
+        self._greeks = build_greeks_engine(self.cfg.get("greeks_source", "provider"))
         self._aggregator = CandleAggregator(
             symbol=self.underlying,
             intervals_minutes=self.intervals,
@@ -117,13 +98,14 @@ class MarketEngine:
         )
         self._price_calculator = get_calculator(self.price_calc_method)
         self._logger = get_logger(self.log_level)
-        
+
         self._logger.log_system_event(
             "provider_selected",
             {
-                "provider": self.cfg.get("data_source", "mock"),
+                "provider": self._source.provider_name,
                 "underlying": self.underlying,
-                "provider_class": self._source.__class__.__name__
+                "provider_class": self._source.__class__.__name__,
+                "status": self._source.status().value,
             }
         )
 
@@ -156,6 +138,9 @@ class MarketEngine:
                 stop_loss_amount=float(sl_amount) if sl_amount is not None else None,
             )
         )
+        # Every open/close goes through the execution interface. Only paper
+        # execution exists; see src/execution/.
+        self._execution = build_execution_client(self.cfg.get("execution_mode", "paper"), self._paper_trading)
 
         # Persistence (SQLite) for completed candles and option chain/ATM snapshots.
         # Purely additive: candle/ATM logic has no dependency on this being enabled.
@@ -383,10 +368,8 @@ class MarketEngine:
         chain = self._latest_chain
         if chain is None:
             return None
-        for leg in chain.strikes:
-            if leg.strike == strike:
-                return leg.call_ltp if option_type.upper() == "CE" else leg.put_ltp
-        return None
+        leg = chain.get_leg(strike)
+        return leg.ltp(option_type) if leg is not None else None
 
     def open_paper_position(
         self,
@@ -394,21 +377,48 @@ class MarketEngine:
         strike: float | None = None,
         quantity: int = 50,
         side: str = "BUY",
+        expiry: str | None = None,
+        underlying: str | None = None,
     ) -> PaperPosition:
+        """Open a SIMULATED position on a contract from the current Option
+        Chain (the source of truth for contract selection). `expiry`/
+        `underlying`, when given, must match the chain — so a selection made
+        against one chain can't silently fill against a different contract."""
+        option_type = (option_type or "").upper()
+        if option_type not in ("CE", "PE"):
+            raise ValueError("option_type must be 'CE' or 'PE'.")
         with self._lock:
             atm = self._latest_atm
             tick = self._latest_tick
+            chain = self._latest_chain
+            if chain is None:
+                raise ValueError("Option chain not available yet; cannot open a paper position.")
+            if underlying is not None and underlying.upper() != chain.underlying.upper():
+                raise ValueError(f"Underlying {underlying} is not the current chain's ({chain.underlying}).")
+            if expiry is not None and expiry != chain.expiry:
+                raise ValueError(f"Expiry {expiry} is not the current chain's ({chain.expiry}).")
             if strike is None:
                 # Defensive fallback only — the UI always sends the strike
                 # explicitly from the selected Option Chain contract.
                 if atm is None:
                     raise ValueError("ATM strike not available yet; cannot open a paper position.")
                 strike = atm.strike
-            price = self._current_leg_price(option_type, strike)
-            if price is None:
+            quote = chain.quote(strike, option_type)
+            if quote is None:
                 raise ValueError(f"Strike {strike} not found in the current option chain.")
             timestamp = tick.timestamp if tick else now_ist()
-        return self._paper_trading.open_position(option_type, strike, quantity, price, timestamp, side=side)
+        result = self._execution.place_order(
+            OrderRequest(
+                contract=quote.contract,
+                side=(side or "BUY").upper(),
+                quantity=quantity,
+                reference_price=quote.ltp,
+                timestamp=timestamp,
+            )
+        )
+        if not result.accepted:
+            raise ValueError(result.message or "Order rejected.")
+        return result.position
 
     def close_paper_position(self, position_id: str) -> PaperPosition | None:
         with self._lock:
@@ -421,7 +431,8 @@ class MarketEngine:
             price = self._current_leg_price(position.option_type, position.strike)
             if price is None:
                 price = position.current_price
-        closed = self._paper_trading.close_position(position_id, price, timestamp, reason="MANUAL")
+        result = self._execution.close_position(position_id, price, timestamp, EXIT_MANUAL)
+        closed = result.position if result.accepted else None
         if closed is not None:
             self._persist_paper_trade(closed)
         return closed
@@ -461,7 +472,7 @@ class MarketEngine:
         with self._lock:
             source = self._source
             chain = self._latest_chain
-            data_source = str(self.cfg.get("data_source", "mock")).lower()
+            data_source = provider_key(self.cfg)
             expiry = chain.expiry if chain is not None else getattr(source, "expiry", None)
             replay_sequence = getattr(source, "sequence_name", DEFAULT_SEQUENCE)
             replay_speed = getattr(source, "speed", 1.0)
@@ -471,6 +482,10 @@ class MarketEngine:
         paper_cfg = self._paper_trading.get_config()
         return {
             "data_source": data_source,
+            "market_data_provider": data_source,
+            "available_providers": sorted(PROVIDERS),
+            "greeks_source": self._greeks.name,
+            "execution_mode": self._execution.mode,
             "expiry": expiry,
             "atm_method": atm_method,
             "delta_threshold": delta_threshold,
@@ -525,17 +540,19 @@ class MarketEngine:
         trading engine, and persisted history all live on `self` and are
         untouched."""
         source_name = str(data_source).lower()
-        if source_name not in ("mock", "nse", "dhan", "replay"):
+        if source_name not in PROVIDERS:
             raise ValueError(
-                f"Unknown data_source: {data_source!r}. Use 'mock', 'nse', 'dhan', or 'replay'."
+                f"Unknown data_source: {data_source!r}. Use one of {sorted(PROVIDERS)}."
             )
         new_cfg = dict(self.cfg)
-        new_cfg["data_source"] = source_name
+        new_cfg["data_source"] = new_cfg["market_data_provider"] = source_name
         if sequence is not None:
             new_cfg["replay_sequence"] = sequence
         if speed is not None:
             new_cfg["replay_speed"] = speed
-        new_source = build_data_source(new_cfg)
+        # Not fail_soft: a provider that can't start is reported to the
+        # caller (HTTP 400) and the current feed keeps running.
+        new_source = build_provider(new_cfg)
 
         was_running = self.is_running
         if was_running:
@@ -561,7 +578,7 @@ class MarketEngine:
     def _tick_worker(self) -> None:
         try:
             self._logger.log_system_event("engine_started", {"underlying": self.underlying})
-            
+
             for tick in self._source.stream_ticks():
                 if self._stop_event.is_set():
                     break
@@ -590,11 +607,12 @@ class MarketEngine:
                 )
 
                 # Log incoming price tick
-                self._logger.log_price_tick(tick, {"source": self.cfg.get("data_source", "mock")})
+                self._logger.log_price_tick(tick, {"source": self._source.provider_name})
 
                 try:
-                    raw = self._source.fetch_option_chain()
-                    chain = parse_option_chain(raw, self.underlying)
+                    # Normalized chain straight from the provider, then Greeks
+                    # (provider-supplied today; see option_chain/greeks.py).
+                    chain = self._greeks.enrich(self._source.get_option_chain())
 
                     # ATM selection: Delta-based (Greeks, default) with automatic
                     # fallback to price-based if the chain carries no Greeks;
@@ -630,11 +648,11 @@ class MarketEngine:
                     self._latest_atm = atm
                     self._latest_chain = chain
                     self._latest_calculated_prices = self._price_calculator.calculate(atm) if atm else None
-                    
+
                     # Log calculated prices
                     if self._latest_calculated_prices:
                         self._logger.log_calculated_prices(self._latest_calculated_prices)
-                    
+
                     # Update RRG calculator if enabled
                     if self._rrg_calculator and chain:
                         try:
@@ -729,25 +747,33 @@ class MarketEngine:
 
     def _build_snapshot(self, completed: list[Candle]) -> dict:
         from src.serializers import serialize_snapshot
-        from src.data_sources.dhan import DhanMarketDataProvider
 
-        cfg_source = str(self.cfg.get("data_source", "mock")).lower()
-        if isinstance(self._source, DhanMarketDataProvider):
-            if self._source.has_received_tick:
-                effective_source = "DHAN"
-                status_label = "LIVE"
-            elif self._source.is_connected:
-                effective_source = "DHAN (SUBSCRIBED)"
-                status_label = "CONNECTING"
-            else:
-                effective_source = "DHAN (CONNECTING)"
-                status_label = "OFFLINE"
-        elif cfg_source == "nse":
-            effective_source = "NSE"
-            status_label = "LIVE" if self._latest_tick else "OFFLINE"
-        else:
-            effective_source = cfg_source
-            status_label = "SIMULATED"
+        # Status comes from the provider itself — no provider-specific
+        # branching here. A crashed tick worker overrides it with ERROR.
+        source = self._source
+        try:
+            status = source.status()
+            status_detail = source.status_detail()
+        except Exception as exc:  # a status probe must never break the snapshot
+            status, status_detail = ProviderStatus.ERROR, f"status unavailable: {exc.__class__.__name__}"
+        if self._worker_error is not None:
+            status = ProviderStatus.ERROR
+            status_detail = f"Feed stopped: {self._worker_error.__class__.__name__}: {self._worker_error}"
+        status_label = status.value
+        # Simulated providers keep their config key ("mock"/"replay") as the
+        # label, exactly as before; market-sourced ones show their name.
+        effective_source = provider_key(self.cfg) if source.is_simulated else source.provider_name
+        provider_info = {
+            "name": source.provider_name,
+            "key": provider_key(self.cfg),
+            "status": status_label,
+            "status_detail": status_detail,
+            "is_simulated": source.is_simulated,
+            "underlying": self.underlying,
+            "expiries": self._latest_chain.expiries if self._latest_chain else [],
+            "greeks_source": self._greeks.name,
+            "execution_mode": self._execution.mode,
+        }
 
         last_tick_age_seconds, is_stale = compute_staleness(
             self._latest_tick.timestamp if self._latest_tick else None,
@@ -777,4 +803,5 @@ class MarketEngine:
             stale_threshold_seconds=self.stale_threshold_seconds,
             persistence_enabled=self._persistence is not None,
             settings=self.get_settings(),
+            provider=provider_info,
         )

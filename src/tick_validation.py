@@ -10,9 +10,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, time as dt_time, tzinfo
-from zoneinfo import ZoneInfo
 
+from src.market_calendar import is_market_holiday
 from src.models import PriceTick
+from src.timeutil import get_zone
 
 
 @dataclass
@@ -67,19 +68,19 @@ def get_market_session_status(
 ) -> str:
     """
     Classify a timestamp relative to the configured market session.
-    Returns one of: "WEEKEND", "PRE_OPEN", "OPEN", "CLOSED".
+    Returns one of: "WEEKEND", "HOLIDAY", "PRE_OPEN", "OPEN", "CLOSED".
 
     Informational only — MOCK data is not gated by this (ticks keep flowing
     outside session hours for dev/demo convenience); it exists so the UI and
     downstream consumers can display accurate session state.
     """
-    tz = ZoneInfo(timezone) if isinstance(timezone, str) else timezone
-    ts = timestamp
-    if tz is not None:
-        ts = ts.astimezone(tz) if ts.tzinfo else ts.replace(tzinfo=tz)
+    tz = get_zone(timezone)
+    ts = timestamp.astimezone(tz) if timestamp.tzinfo else timestamp.replace(tzinfo=tz)
 
     if ts.weekday() >= 5:  # Saturday=5, Sunday=6
         return "WEEKEND"
+    if is_market_holiday(ts.date()):
+        return "HOLIDAY"
 
     start_h, start_m = (int(x) for x in session_start.split(":"))
     end_h, end_m = (int(x) for x in session_end.split(":"))

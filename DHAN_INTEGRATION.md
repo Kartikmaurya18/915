@@ -45,11 +45,12 @@ DHAN_ACCESS_TOKEN=your_access_token_here
 ### config.yaml
 
 ```yaml
-# Currently using mock for development
-data_source: mock
+# The single provider switch (env override: MARKET_DATA_PROVIDER,
+# legacy alias: DATA_SOURCE / data_source)
+market_data_provider: mock
 
 # Switch to dhan when Data API access is enabled
-# data_source: dhan
+# market_data_provider: dhan
 ```
 
 ## Dhan Data API Access
@@ -137,26 +138,50 @@ Price Calculator
 Derived Prices
 ```
 
-## Provider Interface (Unchanged)
+## Provider Interface
 
-Both providers implement the same `DataSource` interface:
+All providers implement `DataSource` / `MarketDataProvider`
+(`src/data_sources/base.py`) and are constructed in exactly one place,
+`src/data_sources/registry.py` (`build_provider`). The engine only calls:
 
-```python
-class DataSource(ABC):
-    @abstractmethod
-    def fetch_option_chain(self) -> dict:
-        """Return raw option chain payload."""
-    
-    @abstractmethod
-    def get_underlying_ltp(self) -> float:
-        """Return latest underlying last traded price."""
-    
-    @abstractmethod
-    def stream_ticks(self):
-        """Yield PriceTick objects continuously."""
-```
+| Method | Returns |
+|---|---|
+| `stream_ticks()` | `PriceTick` (symbol, price, IST timestamp, provider, exchange, instrument_id) |
+| `get_option_chain()` | normalized `OptionChainSnapshot` (`src/models.py`) |
+| `get_underlying_ltp()` | float |
+| `list_expiries()` | every expiry the provider offers |
+| `status()` / `status_detail()` | `CONNECTING` / `LIVE` / `DISCONNECTED` / `ERROR` / `SIMULATED` + reason |
+| `disconnect()` | releases connections |
 
-This ensures seamless switching between providers without code changes.
+Raw payloads stay inside the provider. MOCK/Replay/NSE produce an NSE-style
+dict that the shared adapter `parse_option_chain()` maps; Dhan maps its own
+response into the same model, including Dhan-supplied **Delta, IV, top
+bid/ask and security id**. Optional fields a provider doesn't send stay `None`
+(never 0). The frontend only ever sees the serialized normalized model.
+
+Dhan specifics:
+- Underlying ids live in `DHAN_UNDERLYING_IDS` (`NIFTY 13`, `BANKNIFTY 25`,
+  `SENSEX 51`, segment `IDX_I`). **Verify against Dhan's instrument master
+  before going live.** An unmapped underlying raises an error; it never
+  silently falls back to NIFTY.
+- `dhanhq` 2.0.2 wraps every API body in `{"status","remarks","data"}`, and
+  the option chain / expiry list bodies are wrapped again. `_unwrap_dhan()`
+  handles both. The previous code read only one level, which would have
+  produced an empty chain and "no expiries" once 806 is resolved.
+- If Dhan can't start (missing credentials, network), the app still boots and
+  shows `ERROR` with the reason. It does **not** fall back to MOCK.
+- The WebSocket still subscribes to the underlying index only. Per-option
+  ticks can feed the same candle engine later (it consumes any `PriceTick`).
+
+Related seams:
+- Greeks: `src/option_chain/greeks.py`. `greeks_source: provider` passes
+  through what the provider supplies; no internal calculator exists yet.
+- Execution: `src/execution/`. Every paper order goes through
+  `ExecutionClient.place_order(OrderRequest(contract, ...))`. Only
+  `PaperExecutionClient` exists; `execution_mode` anything other than `paper`
+  is refused.
+- Risk: `src/risk.py`. Pure P&L / TP-SL / multi-leg aggregation, shared by
+  paper trading.
 
 ## Provider Comparison
 
@@ -180,9 +205,9 @@ To switch from Mock to Dhan (after Data API is enabled):
    DHAN_CLIENT_ID=your_client_id
    DHAN_ACCESS_TOKEN=your_access_token
    ```
-3. Edit `config.yaml`:
+3. Edit `config.yaml` (or set `MARKET_DATA_PROVIDER=dhan`):
    ```yaml
-   data_source: dhan
+   market_data_provider: dhan
    ```
 4. Restart the application
 

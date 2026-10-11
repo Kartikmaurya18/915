@@ -70,7 +70,8 @@ def today_ist(tz: str | tzinfo | None = None) -> date:
 
 
 def is_trading_day(d: date) -> bool:
-    """Best-effort: Mon-Fri is a trading day. No market-holiday calendar is
-    wired in, so exchange holidays still show as "no data available" rather
-    than being skipped automatically."""
-    return d.weekday() < 5
+    """Mon-Fri and not a known exchange holiday — delegates to
+    src/market_calendar.py so there is exactly one trading-day rule."""
+    from src.market_calendar import is_trading_day as _calendar_is_trading_day
+
+    return _calendar_is_trading_day(d)

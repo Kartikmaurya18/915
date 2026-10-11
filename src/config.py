@@ -32,7 +32,24 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     # used by Dhan, which resolves the real expiry from its own API.
     config["expiry"] = os.getenv("EXPIRY", config.get("expiry")) or None
     config["underlying"] = os.getenv("UNDERLYING", config.get("underlying", "NIFTY"))
-    config["data_source"] = os.getenv("DATA_SOURCE", config.get("data_source", "mock"))
+    # Market data provider — the ONE switch between MOCK and DHAN (see
+    # src/data_sources/registry.py). MARKET_DATA_PROVIDER / market_data_provider
+    # is the primary name; DATA_SOURCE / data_source is the legacy alias.
+    # Both keys are kept equal so existing readers of "data_source" work.
+    provider = (
+        os.getenv("MARKET_DATA_PROVIDER")
+        or os.getenv("DATA_SOURCE")
+        or config.get("market_data_provider")
+        or config.get("data_source")
+        or "mock"
+    )
+    config["market_data_provider"] = config["data_source"] = str(provider).lower()
+    # Where Greeks come from (see src/option_chain/greeks.py). Only
+    # "provider" exists today; an internal calculator is a future addition.
+    config["greeks_source"] = os.getenv("GREEKS_SOURCE", config.get("greeks_source", "provider"))
+    # Order execution backend (see src/execution/). Only "paper" exists —
+    # live broker execution is deliberately not implemented.
+    config["execution_mode"] = os.getenv("EXECUTION_MODE", config.get("execution_mode", "paper"))
     config["poll_interval_seconds"] = float(
         os.getenv("POLL_INTERVAL_SECONDS", config.get("poll_interval_seconds", 5))
     )
@@ -99,18 +116,25 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
         persistence_cfg["enabled"] = env_persist_enabled.strip().lower() in ("1", "true", "yes")
     else:
         persistence_cfg.setdefault("enabled", False)
-    persistence_cfg["db_path"] = os.getenv(
-        "PERSISTENCE_DB_PATH", persistence_cfg.get("db_path", "data/market_data.db")
-    )
+
+    # In serverless environments like Vercel Lambda, the deployment directory is read-only.
+    # Default SQLite database path to /tmp/market_data.db if running on Vercel and no override is set.
+    default_db_path = persistence_cfg.get("db_path", "data/market_data.db")
+    if os.getenv("VERCEL") or os.getenv("AWS_LAMBDA_FUNCTION_NAME"):
+        default_db_path = "/tmp/market_data.db"
+    persistence_cfg["db_path"] = os.getenv("PERSISTENCE_DB_PATH", default_db_path)
+
     # Committed seed copy of historical MOCK data, restored into `db_path` on
     # startup only if `db_path` doesn't exist yet (e.g. a fresh ephemeral
     # container on a host with no persistent disk) — see
     # src/persistence.py::ensure_seeded(). Never touches an already-existing
     # db_path (localhost's own accumulated history is left alone). Set to a
     # blank/empty value to disable seeding entirely.
-    persistence_cfg["seed_db_path"] = os.getenv(
-        "PERSISTENCE_SEED_DB_PATH", persistence_cfg.get("seed_db_path", "data/seed/market_data.seed.db")
-    )
+    seed_path = persistence_cfg.get("seed_db_path", "data/seed/market_data.seed.db")
+    if seed_path and not Path(seed_path).is_absolute() and (root_dir / seed_path).exists():
+        seed_path = str(root_dir / seed_path)
+    persistence_cfg["seed_db_path"] = os.getenv("PERSISTENCE_SEED_DB_PATH", seed_path)
+
     persistence_cfg["option_chain_snapshot_interval_seconds"] = float(
         os.getenv(
             "PERSISTENCE_CHAIN_INTERVAL_SECONDS",

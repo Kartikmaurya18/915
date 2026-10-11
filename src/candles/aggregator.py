@@ -1,18 +1,17 @@
+"""
+Provider-independent OHLC candle engine: consumes normalized PriceTicks
+(from MOCK today, Dhan later — it never knows which) and buckets them on
+the Asia/Kolkata session grid (see src/timeutil.py).
+"""
+
 from datetime import datetime, timedelta, tzinfo
-from zoneinfo import ZoneInfo
 
 from src.models import Candle, PriceTick
+from src.timeutil import get_zone
 
 
 def _get_tz(tz_input: str | tzinfo | None) -> tzinfo | None:
-    if tz_input is None:
-        return None
-    if isinstance(tz_input, str):
-        try:
-            return ZoneInfo(tz_input)
-        except Exception:
-            return None
-    return tz_input
+    return None if tz_input is None else get_zone(tz_input)
 
 
 def _parse_session_minute(session_start: str | None) -> int:

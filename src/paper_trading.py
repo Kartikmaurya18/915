@@ -24,14 +24,19 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
-from src.models import OptionChainSnapshot
+from src.models import Contract, OptionChainSnapshot
+from src.risk import (  # re-exported: existing callers import these from here
+    EXIT_MANUAL,
+    EXIT_STOP_LOSS,
+    EXIT_TAKE_PROFIT,
+    ExitRule,
+    evaluate_exit,
+    position_pnl,
+)
 from src.timeutil import to_ist
 
 VALID_OPTION_TYPES = ("CE", "PE")
 VALID_SIDES = ("BUY", "SELL")
-EXIT_TAKE_PROFIT = "TAKE_PROFIT"
-EXIT_STOP_LOSS = "STOP_LOSS"
-EXIT_MANUAL = "MANUAL"
 
 
 @dataclass
@@ -89,21 +94,38 @@ class PaperPosition:
     exit_reason: Optional[str] = None  # TAKE_PROFIT | STOP_LOSS | MANUAL
     pnl: float = 0.0
     pnl_percent: float = 0.0
+    # Provider-independent contract identity, captured from the option
+    # chain at open time (None when opened without a chain, e.g. in tests).
+    underlying: Optional[str] = None
+    expiry: Optional[str] = None
+    exchange: Optional[str] = None
+    instrument_id: Optional[str] = None
+
+    @property
+    def contract(self) -> Contract:
+        return Contract(
+            underlying=self.underlying or "",
+            expiry=self.expiry or "",
+            strike=self.strike,
+            option_type=self.option_type,
+            exchange=self.exchange,
+            instrument_id=self.instrument_id,
+        )
+
+    @property
+    def exit_rule(self) -> ExitRule:
+        """This position's own TP/SL thresholds, captured at open time."""
+        return ExitRule(
+            take_profit_percent=self.take_profit_percent,
+            stop_loss_percent=self.stop_loss_percent,
+            take_profit_amount=self.take_profit_amount,
+            stop_loss_amount=self.stop_loss_amount,
+        )
 
     def mark_to_market(self, price: float) -> None:
         self.current_price = price
-        # BUY profits as price rises above entry; SELL (short/write) profits
-        # as price falls below entry — mirror-imaged, same magnitude either
-        # way. pnl_percent stays "signed toward this position's own profit
-        # direction" for both sides, so the TP/SL comparisons in update()
-        # (>= tp / <= -sl) work unchanged regardless of side.
-        direction = 1 if self.side == "BUY" else -1
-        self.pnl = (price - self.entry_price) * self.quantity * direction
-        self.pnl_percent = (
-            ((price - self.entry_price) / self.entry_price) * 100.0 * direction
-            if self.entry_price
-            else 0.0
-        )
+        # Side-aware P&L lives in src/risk.py (shared with any future risk engine).
+        self.pnl, self.pnl_percent = position_pnl(self.side, self.entry_price, price, self.quantity)
 
     def close(self, price: float, timestamp: datetime, reason: str) -> None:
         self.mark_to_market(price)
@@ -155,6 +177,10 @@ class PaperPosition:
             "option_type": self.option_type,
             "side": self.side,
             "strike": self.strike,
+            "underlying": self.underlying,
+            "expiry": self.expiry,
+            "exchange": self.exchange,
+            "instrument_id": self.instrument_id,
             "quantity": self.quantity,
             "entry_price": round(self.entry_price, 2),
             "current_price": round(self.current_price, 2),
@@ -246,6 +272,7 @@ class PaperTradingEngine:
         price: float,
         timestamp: datetime,
         side: str = "BUY",
+        contract: Contract | None = None,
     ) -> PaperPosition:
         option_type = (option_type or "").upper()
         side = (side or "BUY").upper()
@@ -272,6 +299,10 @@ class PaperTradingEngine:
                 stop_loss_percent=self._config.stop_loss_percent,
                 take_profit_amount=self._config.take_profit_amount,
                 stop_loss_amount=self._config.stop_loss_amount,
+                underlying=contract.underlying if contract else None,
+                expiry=contract.expiry if contract else None,
+                exchange=contract.exchange if contract else None,
+                instrument_id=contract.instrument_id if contract else None,
             )
             self._positions[position.id] = position
             return position
@@ -314,29 +345,14 @@ class PaperTradingEngine:
                 current = leg.call_ltp if position.option_type == "CE" else leg.put_ltp
                 position.mark_to_market(current)
 
-                # Two independent exit triggers, both read from what THIS
-                # position captured at open time (never the engine's current
-                # live config, so changing config later never retroactively
-                # moves an already-open position's own thresholds):
-                #   - percent-based (existing): pnl_percent vs. take_profit_percent/stop_loss_percent
-                #   - ₹-based (additional, opt-in): pnl vs. take_profit_amount/stop_loss_amount
-                # Whichever is hit first triggers the exit; TP is checked
-                # before SL when a single tick happens to cross both (e.g. an
-                # unset SL of 0 or an extreme gap), matching prior behavior.
-                take_profit_hit = position.pnl_percent >= position.take_profit_percent or (
-                    position.take_profit_amount is not None and position.pnl >= position.take_profit_amount
-                )
-                stop_loss_hit = position.pnl_percent <= -position.stop_loss_percent or (
-                    position.stop_loss_amount is not None and position.pnl <= -position.stop_loss_amount
-                )
-
-                if take_profit_hit:
-                    position.close(current, timestamp, EXIT_TAKE_PROFIT)
-                    del self._positions[position_id]
-                    self._history.append(position)
-                    exited.append(position)
-                elif stop_loss_hit:
-                    position.close(current, timestamp, EXIT_STOP_LOSS)
+                # Percent and ₹ triggers, both read from what THIS position
+                # captured at open time (never the engine's current live
+                # config, so a later config change never retroactively moves
+                # an already-open position's thresholds). Rule evaluation
+                # lives in src/risk.py::evaluate_exit.
+                reason = evaluate_exit(position.pnl, position.pnl_percent, position.exit_rule)
+                if reason is not None:
+                    position.close(current, timestamp, reason)
                     del self._positions[position_id]
                     self._history.append(position)
                     exited.append(position)

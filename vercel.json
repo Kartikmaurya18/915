@@ -1,0 +1,18 @@
+{
+  "version": 2,
+  "functions": {
+    "api/index.py": {
+      "includeFiles": "frontend/**,config.yaml,data/**"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/index.py"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/api/index.py"
+    }
+  ]
+}

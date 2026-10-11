@@ -270,6 +270,7 @@ const SESSION_LABELS = {
   PRE_OPEN: "Pre-Open",
   CLOSED: "Session Closed",
   WEEKEND: "Weekend",
+  HOLIDAY: "Market Holiday",
 };
 
 // ---------------------------------------------------------------------------
@@ -1000,11 +1001,17 @@ function toggleMultiSelect(checkbox) {
   const key = multiSelectKey(strike, optionType);
 
   if (checkbox.checked) {
+    // Capture the contract's identity from the chain it was selected in, so
+    // the backend can refuse it if that chain has since moved on (e.g. an
+    // expiry rollover) instead of filling a different contract.
+    const chain = state.latestSnapshot?.option_chain;
     state.multiSelected.set(key, {
       strike,
       optionType,
       side: "BUY",
       quantity: Number(els.defaultQty.value) || 50,
+      expiry: chain?.expiry ?? null,
+      underlying: chain?.underlying ?? null,
     });
   } else {
     state.multiSelected.delete(key);
@@ -1034,6 +1041,8 @@ function postOpenPosition(entry) {
       strike: entry.strike,
       side: entry.side,
       quantity: entry.quantity,
+      expiry: entry.expiry ?? null,
+      underlying: entry.underlying ?? null,
     }),
   }).then(async (res) => {
     if (!res.ok) {
@@ -1916,6 +1925,9 @@ function handleSnapshot(snapshot) {
   els.moTimestamp.textContent = snapshot.timestamp ? `As of ${fmtTime(snapshot.timestamp)}` : "—";
   if (snapshot.status) {
     setConnectionStatus(snapshot.status);
+    // Reason behind ERROR/DISCONNECTED etc. (e.g. "Dhan Data APIs not
+    // subscribed"), shown on hover rather than adding new layout.
+    els.connStatus.title = snapshot.provider?.status_detail || "";
   }
 
   updateSpot(snapshot.price, snapshot.timestamp);
@@ -1966,11 +1978,37 @@ function handleSnapshot(snapshot) {
   }
 }
 
+let fallbackPollTimer = null;
+
+function startFallbackPolling() {
+  if (fallbackPollTimer) return;
+  fallbackPollTimer = setInterval(async () => {
+    if (state.sessionMode === "historical") return;
+    try {
+      const res = await fetch("/api/snapshot");
+      if (res.ok) {
+        const snapshot = await res.json();
+        handleSnapshot(snapshot);
+      }
+    } catch (err) {
+      // transient network error
+    }
+  }, 2000);
+}
+
+function stopFallbackPolling() {
+  if (fallbackPollTimer) {
+    clearInterval(fallbackPollTimer);
+    fallbackPollTimer = null;
+  }
+}
+
 function connectWebSocket() {
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${protocol}://${window.location.host}/ws`);
 
   ws.onopen = () => {
+    stopFallbackPolling();
     // Pre-first-snapshot placeholder; the real LIVE/SIMULATED/OFFLINE label
     // arrives (and overwrites this) on the first message. Must be a string —
     // setConnectionStatus() calls .includes() on it.
@@ -1992,7 +2030,8 @@ function connectWebSocket() {
 
   ws.onclose = () => {
     setConnectionStatus(false);
-    state.reconnectTimer = setTimeout(connectWebSocket, 2000);
+    startFallbackPolling();
+    state.reconnectTimer = setTimeout(connectWebSocket, 5000);
   };
 
   ws.onerror = () => {

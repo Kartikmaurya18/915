@@ -37,6 +37,11 @@ class StrikeStraddleCandleEngine:
         self.session_start = session_start
         # strike -> {"ce": CandleAggregator, "pe": CandleAggregator, "straddle": CandleAggregator}
         self._builders: dict[float, dict[str, CandleAggregator]] = {}
+        # (underlying, expiry) the series above belong to. Strike alone only
+        # identifies a contract within one underlying+expiry, so when either
+        # changes (expiry rollover, provider/underlying switch) the series
+        # restart rather than splice two different contracts into one bar.
+        self._scope: tuple[str, str] | None = None
 
     def _get_or_create(self, strike: float) -> dict[str, CandleAggregator]:
         builders = self._builders.get(strike)
@@ -59,6 +64,10 @@ class StrikeStraddleCandleEngine:
         (for the caller to persist — see MarketEngine._tick_worker)."""
         if chain is None:
             return []
+        scope = (chain.underlying, chain.expiry)
+        if self._scope is not None and scope != self._scope:
+            self._builders.clear()
+        self._scope = scope
         finalized: list[Candle] = []
         for leg in chain.strikes:
             builders = self._get_or_create(leg.strike)

@@ -51,6 +51,7 @@ def serialize_atm(atm: ATMResult | None) -> dict | None:
         "put_delta": atm.put_delta,
         "delta_threshold": atm.delta_threshold,
         "price_based_strike": atm.price_based_strike,
+        "greeks_source": atm.greeks_source,
     }
 
 
@@ -89,8 +90,17 @@ def serialize_chain(chain: OptionChainSnapshot | None, atm_strike: float | None)
                 "put_oi": leg.put_oi,
                 "call_volume": leg.call_volume,
                 "put_volume": leg.put_volume,
-                "call_delta": leg.call_delta,  # Optional: CE Delta for future Delta-based ATM
-                "put_delta": leg.put_delta,  # Optional: PE Delta for future Delta-based ATM
+                "call_delta": leg.call_delta,
+                "put_delta": leg.put_delta,
+                # Optional normalized fields — None when the provider doesn't supply them.
+                "call_iv": leg.call_iv,
+                "put_iv": leg.put_iv,
+                "call_bid": leg.call_bid,
+                "call_ask": leg.call_ask,
+                "put_bid": leg.put_bid,
+                "put_ask": leg.put_ask,
+                "call_instrument_id": leg.call_instrument_id,
+                "put_instrument_id": leg.put_instrument_id,
                 # Same isolated CE+PE formula used everywhere else (MockPriceCalculator._combined_value)
                 "combined_value": leg.call_ltp + leg.put_ltp,
                 "is_atm": leg.strike == atm_strike if atm_strike is not None else False,
@@ -101,8 +111,13 @@ def serialize_chain(chain: OptionChainSnapshot | None, atm_strike: float | None)
         "underlying": chain.underlying,
         "underlying_ltp": chain.underlying_ltp,
         "expiry": chain.expiry,
+        "expiries": list(chain.expiries),
         "expiry_type": chain.expiry_type,  # Configurable expiry type
+        "provider": chain.provider,
+        "exchange": chain.exchange,
+        "greeks_source": chain.greeks_source,
         "timestamp": _dt(chain.timestamp),
+        "trading_date": chain.trading_date,
         "strikes": strikes,
     }
 
@@ -276,6 +291,7 @@ def serialize_snapshot(
     rejected_tick_count: int = 0,
     market_session: str | None = None,
     settings: dict | None = None,
+    provider: dict | None = None,
 ) -> dict:
     atm_strike = atm.strike if atm else None
     candles_by_interval: dict[str, dict] = {}
@@ -301,6 +317,10 @@ def serialize_snapshot(
         "underlying": underlying,
         "data_source": data_source,
         "status": status,
+        # Provider identity/state (name, LIVE/SIMULATED/ERROR/..., reason,
+        # available expiries, Greeks source, execution mode). Never contains
+        # credentials.
+        "provider": provider or {"name": data_source, "status": status},
         "tick_count": tick_count,
         "price": tick.price if tick else None,
         "timestamp": _dt(tick.timestamp) if tick else None,

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
-from zoneinfo import ZoneInfo
+
+from src.market_calendar import is_trading_day, previous_trading_day
+from src.timeutil import today_ist
 
 # NIFTY's historical weekly-expiry weekday (Thursday). MOCK/Replay data has no
 # real exchange calendar to consult, so this is just a reasonable, documented
@@ -35,7 +37,11 @@ def resolve_mock_expiry(
         return str(configured_expiry)
 
     if today is None:
-        today = datetime.now(ZoneInfo(timezone)).date()
+        today = today_ist(timezone)
     days_ahead = (weekday - today.weekday()) % 7
     expiry_date = today + timedelta(days=days_ahead)
+    # Exchanges move an expiry that lands on a holiday to the previous
+    # trading day; mirror that so MOCK never reports a holiday expiry.
+    if not is_trading_day(expiry_date):
+        expiry_date = previous_trading_day(expiry_date)
     return expiry_date.strftime("%d-%b-%Y")

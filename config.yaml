@@ -16,8 +16,24 @@ candle_intervals:
   - 5
   - 15
 
-# Data source: "nse" for live NSE India data, "mock" for simulated ticks, "dhan" for DhanHQ
-data_source: mock
+# Market data provider — the single switch for where prices come from:
+#   mock   simulated ticks (SIMULATED badge)      replay  deterministic mock sequences
+#   dhan   DhanHQ live feed (needs DHAN_CLIENT_ID / DHAN_ACCESS_TOKEN in .env,
+#          server-side only — never sent to the browser)
+#   nse    NSE India website scrape
+# Env override: MARKET_DATA_PROVIDER (legacy alias: DATA_SOURCE).
+# Every provider produces the same normalized model (src/models.py), so the
+# UI, ATM, candles, straddle and paper trading don't change between them.
+market_data_provider: mock
+
+# Where Delta/IV come from. "provider" = use what the market data provider
+# supplies (MOCK: simulated Delta, no IV; Dhan: Delta + IV from its option
+# chain). An internal Greeks calculator is not implemented yet.
+greeks_source: provider
+
+# Order execution backend. Only "paper" (simulation) exists; real broker
+# execution is intentionally not implemented.
+execution_mode: paper
 
 # Timezone & Market Session Configuration
 timezone: "Asia/Kolkata"

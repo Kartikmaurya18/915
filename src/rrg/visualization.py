@@ -302,7 +302,7 @@ def create_rrg_chart_from_data(
     
     # Create mock snapshot from raw data
     from src.rrg.models import RRGDataPoint, RRGQuadrant, RRGSnapshot
-    from datetime import datetime
+    from src.timeutil import now_ist
     
     data_points = []
     for rs_ratio, rs_momentum, label in zip(rs_ratios, rs_momentums, labels):
@@ -328,7 +328,7 @@ def create_rrg_chart_from_data(
             rs_ratio=rs_ratio,
             rs_momentum=rs_momentum,
             quadrant=quadrant,
-            timestamp=datetime.now(),
+            timestamp=now_ist(),
             option_ltp=0.0,
             benchmark_ltp=0.0,
         ))
@@ -337,7 +337,7 @@ def create_rrg_chart_from_data(
         benchmark_symbol="NIFTY",
         benchmark_ltp=0.0,
         timeframe="custom",
-        timestamp=datetime.now(),
+        timestamp=now_ist(),
         data_points=data_points,
     )
     

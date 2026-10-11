@@ -70,10 +70,14 @@ async def snapshot() -> dict:
 
 @app.get("/api/config")
 async def config() -> dict:
+    # Non-secret settings only — provider credentials stay server-side.
     cfg = load_config()
     return {
         "underlying": cfg.get("underlying", "NIFTY"),
         "data_source": cfg.get("data_source", "mock"),
+        "market_data_provider": cfg.get("market_data_provider", "mock"),
+        "greeks_source": cfg.get("greeks_source", "provider"),
+        "execution_mode": cfg.get("execution_mode", "paper"),
         "poll_interval_seconds": cfg.get("poll_interval_seconds", 5),
         "candle_intervals": cfg.get("candle_intervals", [1, 5, 15]),
     }
@@ -142,6 +146,10 @@ class OpenPositionRequest(BaseModel):
     strike: float | None = None
     quantity: int = 50
     side: str = "BUY"  # "BUY" (long) or "SELL" (short/write) — simulation only
+    # Optional contract identity from the Option Chain row the user selected;
+    # rejected if it no longer matches the current chain.
+    expiry: str | None = None
+    underlying: str | None = None
 
 
 class PaperConfigRequest(BaseModel):
@@ -178,7 +186,9 @@ async def paper_state() -> dict:
 async def paper_open(req: OpenPositionRequest) -> dict:
     """Open a SIMULATED CE/PE position. Never places a real broker order."""
     try:
-        position = engine.open_paper_position(req.option_type, req.strike, req.quantity, req.side)
+        position = engine.open_paper_position(
+            req.option_type, req.strike, req.quantity, req.side, expiry=req.expiry, underlying=req.underlying
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return position.to_dict()
@@ -284,6 +294,14 @@ async def no_cache_for_frontend(request, call_next):
     existing ETag/Last-Modified (still enables a cheap 304) but require the
     browser to ask every time rather than trusting a heuristic window.
     """
+    global _loop
+    if not engine.is_running:
+        try:
+            _loop = asyncio.get_running_loop()
+            engine.subscribe(_broadcast)
+        except RuntimeError:
+            pass
+        engine.start()
     response = await call_next(request)
     if request.url.path == "/" or request.url.path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-cache, must-revalidate"
