@@ -1,0 +1,9 @@
+[project]
+name = "live-market-data"
+version = "1.0.0"
+description = "Live Market Data, Option Chain & Candle Generation System"
+readme = "README.md"
+requires-python = ">=3.10"
+
+[tool.vercel]
+entrypoint = "api/index.py:app"
