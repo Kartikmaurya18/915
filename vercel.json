@@ -2,12 +2,12 @@
   "version": 2,
   "functions": {
     "api/index.py": {
-      "includeFiles": "frontend/**,config.yaml,data/**"
+      "includeFiles": "config.yaml,data/**"
     }
   },
   "rewrites": [
     {
-      "source": "/(.*)",
+      "source": "/api/(.*)",
       "destination": "/api/index.py"
     }
   ]

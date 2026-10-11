@@ -1,0 +1,1659 @@
+:root {
+  --bg: #0b0f14;
+  --bg-elevated: #121820;
+  --bg-panel: #151c26;
+  --border: #243041;
+  --text: #e8eef7;
+  --text-muted: #8b9bb0;
+  --accent: #3b82f6;
+  --accent-soft: rgba(59, 130, 246, 0.15);
+  --green: #22c55e;
+  --green-soft: rgba(34, 197, 94, 0.15);
+  --red: #ef4444;
+  --red-soft: rgba(239, 68, 68, 0.15);
+  --call: #38bdf8;
+  --put: #fb7185;
+  /* Multi-strike selection (checkboxes in the Option Chain) — distinct from
+     --accent (used for the single "pinned" contract) so both selection
+     mechanisms stay visually unambiguous when used at the same time. */
+  --multi: #a855f7;
+  --multi-soft: rgba(168, 85, 247, 0.15);
+  --shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  --radius: 14px;
+  --font: "IBM Plex Sans", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  min-height: 100%;
+  background: radial-gradient(circle at top, #111927 0%, var(--bg) 45%);
+  color: var(--text);
+  font-family: var(--font);
+}
+
+.app {
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.topbar {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr auto;
+  gap: 20px;
+  align-items: center;
+  padding: 20px 24px;
+  background: linear-gradient(135deg, rgba(21, 28, 38, 0.95), rgba(15, 20, 28, 0.95));
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  margin-bottom: 18px;
+}
+
+.brand {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+}
+
+.brand-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 16px var(--accent);
+}
+
+.brand h1 {
+  margin: 0;
+  font-size: 1.35rem;
+  letter-spacing: 0.02em;
+}
+
+.subtitle {
+  margin: 4px 0 0;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.spot-panel {
+  text-align: center;
+}
+
+.spot-label {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.spot-row {
+  display: flex;
+  justify-content: center;
+  align-items: baseline;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.spot-price {
+  font-family: var(--mono);
+  font-size: 2rem;
+  font-weight: 600;
+}
+
+.spot-change {
+  font-family: var(--mono);
+  font-size: 0.95rem;
+  padding: 4px 8px;
+  border-radius: 999px;
+}
+
+.spot-change.up {
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.spot-change.down {
+  color: var(--red);
+  background: var(--red-soft);
+}
+
+.spot-change.neutral {
+  color: var(--text-muted);
+  background: rgba(139, 155, 176, 0.12);
+}
+
+.status-panel {
+  text-align: right;
+}
+
+.badge {
+  display: inline-block;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.badge-live {
+  color: var(--green);
+  background: var(--green-soft);
+  border: 1px solid rgba(34, 197, 94, 0.35);
+}
+
+.badge-simulated {
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+}
+
+.badge-connecting {
+  color: #3b82f6;
+  background: rgba(59, 130, 246, 0.15);
+  border: 1px solid rgba(59, 130, 246, 0.35);
+}
+
+.badge-offline {
+  color: var(--red);
+  background: var(--red-soft);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+}
+
+.badge-row {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.badge-stale {
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  animation: pulse-dot 1.4s ease-in-out infinite;
+}
+
+.badge-stale.hidden {
+  display: none;
+}
+
+.badge-session {
+  color: var(--text-muted);
+  background: rgba(139, 155, 176, 0.12);
+  border: 1px solid var(--border);
+}
+
+.badge-session.session-open {
+  color: var(--green);
+  background: var(--green-soft);
+  border-color: rgba(34, 197, 94, 0.35);
+}
+
+.badge-session.session-pre_open {
+  color: #3b82f6;
+  background: rgba(59, 130, 246, 0.15);
+  border-color: rgba(59, 130, 246, 0.35);
+}
+
+.badge-session.session-closed,
+.badge-session.session-weekend {
+  color: var(--text-muted);
+  background: rgba(139, 155, 176, 0.12);
+  border-color: var(--border);
+}
+
+.meta {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  margin-top: 6px;
+  font-family: var(--mono);
+}
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.metric-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.metric-card.highlight {
+  background: linear-gradient(180deg, rgba(59, 130, 246, 0.12), var(--bg-panel));
+  border-color: rgba(59, 130, 246, 0.35);
+}
+
+.metric-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.chip-mini {
+  font-size: 0.68rem;
+  padding: 2px 8px;
+}
+
+.metric-sub {
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 0.74rem;
+}
+
+.metric-sub.hidden {
+  display: none;
+}
+
+#tick-reliability {
+  color: #f59e0b;
+  font-size: 0.76rem;
+}
+
+.metric-label {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.metric-value {
+  font-family: var(--mono);
+  font-size: 1.35rem;
+  font-weight: 600;
+}
+
+.metric-value.call { color: var(--call); }
+.metric-value.put { color: var(--put); }
+
+.main-grid {
+  display: grid;
+  grid-template-columns: 1.45fr 1fr;
+  gap: 18px;
+}
+
+.side-column {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.panel-header h2 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.interval-tabs {
+  display: flex;
+  gap: 6px;
+}
+
+.tab {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: 0.15s ease;
+}
+
+.tab:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.tab.active {
+  color: var(--text);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.chip {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--accent);
+  background: var(--accent-soft);
+  padding: 4px 10px;
+  border-radius: 999px;
+}
+
+.chart-container {
+  height: 420px;
+  width: 100%;
+}
+
+.active-candle {
+  padding: 10px 18px 14px;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  border-top: 1px solid var(--border);
+}
+
+.table-wrap {
+  max-height: 280px;
+  overflow: auto;
+}
+
+.table-wrap.short {
+  max-height: 220px;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+}
+
+.data-table th,
+.data-table td {
+  padding: 10px 12px;
+  text-align: right;
+  border-bottom: 1px solid rgba(36, 48, 65, 0.65);
+}
+
+.data-table th:first-child,
+.data-table td:first-child {
+  text-align: left;
+}
+
+.data-table th:nth-child(2),
+.data-table td:nth-child(2) {
+  text-align: center;
+}
+
+.data-table th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.data-table tr.atm-row {
+  background: rgba(59, 130, 246, 0.1);
+}
+
+/* Strike is column 4 in #option-chain-table: Sel(CE), CE LTP, CE Δ, Strike,
+   PE Δ, PE LTP, Sel(PE), CE+PE. */
+#option-chain-table tr.atm-row td:nth-child(4) {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.data-table tr.price-atm-row {
+  background: rgba(245, 158, 11, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(245, 158, 11, 0.3);
+}
+
+#option-chain-table tr.price-atm-row td:nth-child(4) {
+  color: #f59e0b;
+  font-weight: 600;
+}
+
+.data-table .call-cell { color: var(--call); }
+.data-table .put-cell { color: var(--put); }
+.data-table .delta-cell { color: var(--text-muted); font-size: 0.74rem; }
+
+.chain-legend {
+  display: flex;
+  gap: 16px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  display: inline-block;
+}
+
+.legend-swatch.atm-swatch { background: rgba(59, 130, 246, 0.45); }
+.legend-swatch.price-swatch { background: rgba(245, 158, 11, 0.45); }
+
+.data-table .empty {
+  text-align: center;
+  color: var(--text-muted);
+  padding: 24px;
+}
+
+.toast {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 12px 16px;
+  border-radius: 10px;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  box-shadow: var(--shadow);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.toast.hidden {
+  opacity: 0;
+  transform: translateY(8px);
+  pointer-events: none;
+}
+
+/* ---------------------------------------------------------------------- */
+/* General polish                                                          */
+/* ---------------------------------------------------------------------- */
+
+.panel {
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.panel:hover {
+  border-color: rgba(59, 130, 246, 0.3);
+}
+
+.metric-card {
+  transition: transform 0.15s ease, border-color 0.15s ease;
+}
+
+.metric-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(59, 130, 246, 0.35);
+}
+
+.sim-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 18px;
+  margin-bottom: 14px;
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 10px;
+  color: #f5b942;
+  font-size: 0.82rem;
+  font-family: var(--mono);
+  letter-spacing: 0.01em;
+}
+
+.sim-banner.hidden {
+  display: none;
+}
+
+.sim-banner-dot {
+  width: 8px;
+  height: 8px;
+  min-width: 8px;
+  border-radius: 50%;
+  background: #f59e0b;
+  box-shadow: 0 0 10px #f59e0b;
+  animation: pulse-dot 1.6s ease-in-out infinite;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+/* ---------------------------------------------------------------------- */
+/* Paper trading panel                                                     */
+/* ---------------------------------------------------------------------- */
+
+.trading-panel {
+  margin-top: 18px;
+}
+
+.chip-sim {
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+}
+
+.trading-body {
+  padding: 16px 18px 20px;
+}
+
+.trading-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  justify-content: space-between;
+  padding-bottom: 16px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.config-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 10px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.field label {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.field input,
+.field select {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  padding: 8px 10px;
+  width: 110px;
+}
+
+.field input:focus,
+.field select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.btn {
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 9px 16px;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: 0.15s ease;
+  letter-spacing: 0.02em;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+}
+
+.btn-primary:hover {
+  background: #2f6fdb;
+}
+
+.btn-ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-muted);
+}
+
+.btn-ghost:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.btn-close {
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  color: var(--red);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  cursor: pointer;
+  transition: 0.15s ease;
+}
+
+.btn-close:hover {
+  background: rgba(239, 68, 68, 0.22);
+}
+
+.btn-close:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Per-row "Execute" in the Multi-Strike Selection table — executes just
+   that one contract, independent of the bulk "Execute Selected" button. */
+.btn-execute-row {
+  background: rgba(34, 197, 94, 0.12);
+  border: 1px solid rgba(34, 197, 94, 0.35);
+  color: var(--green);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  cursor: pointer;
+  transition: 0.15s ease;
+  margin-right: 6px;
+}
+
+.btn-execute-row:hover {
+  background: rgba(34, 197, 94, 0.22);
+}
+
+.btn-execute-row:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.pt-error {
+  color: var(--red);
+  background: var(--red-soft);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  margin-bottom: 14px;
+}
+
+.pt-error.hidden {
+  display: none;
+}
+
+.data-table.wide {
+  min-width: 760px;
+}
+
+.inner-header {
+  padding: 16px 0 10px;
+  border-bottom: none;
+}
+
+.inner-header h3 {
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.pnl-pos { color: var(--green); font-weight: 600; }
+.pnl-neg { color: var(--red); font-weight: 600; }
+.pnl-flat { color: var(--text-muted); }
+
+.badge-status {
+  display: inline-block;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.status-open {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid rgba(59, 130, 246, 0.35);
+}
+
+.status-exited {
+  color: var(--text-muted);
+  background: rgba(139, 155, 176, 0.12);
+  border: 1px solid var(--border);
+}
+
+.badge-reason {
+  display: inline-block;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.reason-tp {
+  color: var(--green);
+  background: var(--green-soft);
+  border: 1px solid rgba(34, 197, 94, 0.4);
+}
+
+.reason-sl {
+  color: var(--red);
+  background: var(--red-soft);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+}
+
+.reason-manual {
+  color: var(--text-muted);
+  background: rgba(139, 155, 176, 0.12);
+  border: 1px solid var(--border);
+}
+
+@media (max-width: 1100px) {
+  .topbar,
+  .main-grid,
+  .metrics-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .status-panel {
+    text-align: left;
+  }
+
+  .metrics-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .app {
+    padding: 12px;
+  }
+
+  .metrics-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .chart-container {
+    height: 320px;
+  }
+
+  .trading-controls {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .field input,
+  .field select {
+    width: 100%;
+  }
+}
+
+/* ---------------------------------------------------------------------- */
+/* Main tab navigation                                                     */
+/* ---------------------------------------------------------------------- */
+
+.main-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 18px;
+  padding: 6px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow-x: auto;
+}
+
+.main-tab {
+  flex: 0 0 auto;
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid transparent;
+  border-radius: 9px;
+  padding: 9px 18px;
+  font-family: var(--font);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: 0.15s ease;
+  letter-spacing: 0.01em;
+}
+
+.main-tab:hover {
+  color: var(--text);
+}
+
+.main-tab.active {
+  color: var(--text);
+  background: var(--accent-soft);
+  border-color: rgba(59, 130, 246, 0.4);
+}
+
+.view.hidden {
+  display: none;
+}
+
+.chip-warn {
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.15);
+  border: none;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Chart crosshair OHLC tooltip                                            */
+/* ---------------------------------------------------------------------- */
+
+.chart-wrap {
+  position: relative;
+}
+
+.chart-tooltip {
+  position: absolute;
+  z-index: 5;
+  pointer-events: none;
+  display: flex;
+  gap: 12px;
+  background: rgba(10, 14, 20, 0.92);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  box-shadow: var(--shadow);
+  white-space: nowrap;
+}
+
+.chart-tooltip.hidden {
+  display: none;
+}
+
+.chart-tooltip b {
+  color: var(--text);
+}
+
+.chart-tooltip .tt-up b { color: var(--green); }
+.chart-tooltip .tt-down b { color: var(--red); }
+.chart-tooltip .tt-call { color: var(--call); }
+.chart-tooltip .tt-put { color: var(--put); }
+
+.combined-cell {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Trade stats strip                                                       */
+/* ---------------------------------------------------------------------- */
+
+.stats-strip {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.stat-tile {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.stat-tile.highlight {
+  background: linear-gradient(180deg, rgba(59, 130, 246, 0.12), var(--bg-elevated));
+  border-color: rgba(59, 130, 246, 0.35);
+}
+
+.stat-label {
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.stat-value {
+  font-family: var(--mono);
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+/* ---------------------------------------------------------------------- */
+/* RRG tab                                                                  */
+/* ---------------------------------------------------------------------- */
+
+.rrg-body {
+  display: flex;
+  gap: 18px;
+  padding: 18px;
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+.rrg-plot-wrap {
+  flex: 1 1 420px;
+  min-width: 300px;
+}
+
+.rrg-svg {
+  width: 100%;
+  height: auto;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.rrg-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 8px;
+}
+
+.rrg-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  font-family: var(--mono);
+}
+
+.rrg-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.quad-leading, .rrg-dot.quad-leading, .rrg-quad-tag.quad-leading { color: var(--green); background: var(--green); }
+.quad-weakening, .rrg-dot.quad-weakening, .rrg-quad-tag.quad-weakening { color: #f59e0b; background: #f59e0b; }
+.quad-lagging, .rrg-dot.quad-lagging, .rrg-quad-tag.quad-lagging { color: var(--red); background: var(--red); }
+.quad-improving, .rrg-dot.quad-improving, .rrg-quad-tag.quad-improving { color: var(--accent); background: var(--accent); }
+
+.rrg-quad-tag {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: capitalize;
+  background: rgba(139, 155, 176, 0.15) !important;
+}
+
+.rrg-point {
+  fill-opacity: 0.85;
+  stroke: var(--bg);
+  stroke-width: 1.5;
+}
+
+.rrg-point.quad-leading { fill: var(--green); }
+.rrg-point.quad-weakening { fill: #f59e0b; }
+.rrg-point.quad-lagging { fill: var(--red); }
+.rrg-point.quad-improving { fill: var(--accent); }
+
+.rrg-point-label {
+  fill: var(--text-muted);
+  font-size: 9px;
+  font-family: var(--mono);
+  text-anchor: middle;
+}
+
+.rrg-axis {
+  stroke: var(--border);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 4;
+}
+
+.rrg-axis-label {
+  fill: var(--text-muted);
+  font-size: 11px;
+  font-family: var(--mono);
+}
+
+.rrg-quad-bg {
+  opacity: 0.06;
+}
+
+.quad-leading-bg { fill: var(--green); }
+.quad-weakening-bg { fill: #f59e0b; }
+.quad-lagging-bg { fill: var(--red); }
+.quad-improving-bg { fill: var(--accent); }
+
+/* ---------------------------------------------------------------------- */
+/* Data Quality tab                                                         */
+/* ---------------------------------------------------------------------- */
+
+.dq-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+  padding: 18px;
+}
+
+.dq-tile {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dq-label {
+  color: var(--text-muted);
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.dq-value {
+  font-family: var(--mono);
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.dq-good { color: var(--green); }
+.dq-bad { color: var(--red); }
+
+/* ---------------------------------------------------------------------- */
+/* System Logs tab                                                         */
+/* ---------------------------------------------------------------------- */
+
+.log-controls {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.log-controls select {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  padding: 6px 10px;
+}
+
+.log-follow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-family: var(--mono);
+  cursor: pointer;
+}
+
+.logs-wrap {
+  max-height: 560px;
+}
+
+.log-level {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.log-info {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.log-error {
+  color: var(--red);
+  background: var(--red-soft);
+}
+
+.log-detail {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  text-align: left;
+  max-width: 480px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#logs-table th:nth-child(3),
+#logs-table td:nth-child(3),
+#logs-table th:nth-child(4),
+#logs-table td:nth-child(4) {
+  text-align: left;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Settings tab                                                            */
+/* ---------------------------------------------------------------------- */
+
+.settings-body {
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.settings-group {
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-group:last-of-type {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.settings-group h3 {
+  margin: 0 0 6px;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.settings-hint {
+  margin: 0 0 12px;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.settings-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 12px;
+}
+
+.settings-form select#set-replay-sequence {
+  text-transform: capitalize;
+}
+
+.readonly-field {
+  margin-top: 12px;
+}
+
+.readonly-value {
+  display: block;
+  font-family: var(--mono);
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  padding: 8px 0;
+}
+
+.settings-status {
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+}
+
+.settings-status.hidden {
+  display: none;
+}
+
+.settings-ok {
+  color: var(--green);
+  background: var(--green-soft);
+  border: 1px solid rgba(34, 197, 94, 0.35);
+}
+
+.settings-error {
+  color: var(--red);
+  background: var(--red-soft);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+}
+
+#replay-sequence-field.hidden,
+#replay-speed-field.hidden {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .stats-strip {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .stats-strip {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .main-tabs {
+    justify-content: flex-start;
+  }
+}
+
+/* ---------------------------------------------------------------------- */
+/* ATM Straddle chart                                                      */
+/* ---------------------------------------------------------------------- */
+
+.straddle-panel {
+  margin-top: 18px;
+}
+
+.straddle-header {
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.straddle-controls {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.straddle-summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.straddle-value-block {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.straddle-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.straddle-meta .meta {
+  margin-top: 0;
+}
+
+.straddle-chart-container {
+  height: 300px;
+}
+
+.legend-swatch.straddle-swatch { background: var(--accent); }
+
+.straddle-hint {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* Informational only (0 or 1 strike selected in the unified Multi-Strike
+   Selection state) — not clickable. #straddle-focus-select takes over once
+   2+ distinct strikes are selected (see updateStraddleChart() in app.js). */
+.straddle-mode-chip {
+  border: 1px solid rgba(59, 130, 246, 0.35);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-family: var(--mono);
+}
+
+.scc-hint {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  font-style: italic;
+}
+
+.default-qty-field {
+  gap: 2px;
+}
+
+.default-qty-field input {
+  width: 70px;
+  padding: 5px 8px;
+  font-size: 0.78rem;
+}
+
+.straddle-focus-select {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+/* This codebase hides elements via a plain ".hidden" class with no generic
+   fallback rule — every component that gets toggled needs its own
+   "<selector>.hidden { display: none; }" (see chart-tooltip/view/etc.
+   elsewhere in this file). These three are for elements new to the unified
+   Multi-Strike Selection / Straddle Chart focus picker. */
+.chip-mini.hidden,
+.empty-hint.hidden,
+.table-wrap.hidden,
+.straddle-focus-select.hidden {
+  display: none;
+}
+
+/* Hover feedback only — the click action lives on the CE/PE cell/checkbox
+   inside the row, not the row itself. */
+#option-chain-body tr:hover {
+  background: rgba(139, 155, 176, 0.08);
+}
+
+/* ---------------------------------------------------------------------- */
+/* Paper Trading — contract selection lives ONLY in Multi-Strike Selection */
+/* (state.multiSelected); CE/PE cells here are a click-to-toggle shortcut  */
+/* for the same checkbox, not a separate selection mechanism.              */
+/* ---------------------------------------------------------------------- */
+
+.data-table td.call-cell,
+.data-table td.put-cell {
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background 0.12s ease;
+}
+
+.data-table td.call-cell:hover,
+.data-table td.put-cell:hover {
+  background: rgba(139, 155, 176, 0.14);
+}
+
+.side-toggle {
+  display: flex;
+  gap: 6px;
+}
+
+.side-btn {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  font-weight: 700;
+  padding: 8px 14px;
+  cursor: pointer;
+  transition: 0.15s ease;
+}
+
+.side-btn.side-buy.active {
+  background: var(--green-soft);
+  border-color: rgba(34, 197, 94, 0.5);
+  color: var(--green);
+}
+
+.side-btn.side-sell.active {
+  background: var(--red-soft);
+  border-color: rgba(239, 68, 68, 0.5);
+  color: var(--red);
+}
+
+.badge-side {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.badge-side.side-buy {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.badge-side.side-sell {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+@media (max-width: 900px) {
+  .scc-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/* ---------------------------------------------------------------------- */
+/* Multi-strike selection: Option Chain checkboxes + Paper Trading batch   */
+/* ---------------------------------------------------------------------- */
+
+.chain-header-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.btn-mini {
+  padding: 4px 10px;
+  font-size: 0.7rem;
+}
+
+.chk-col {
+  width: 28px;
+  text-align: center;
+  padding-left: 4px !important;
+  padding-right: 4px !important;
+}
+
+.data-table td.chk-col {
+  text-align: center;
+}
+
+.multi-select-checkbox {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--multi);
+  cursor: pointer;
+}
+
+/* A CE/PE cell checked for the multi-strike batch — distinct color from the
+   single "pinned" selection's .selected-contract-cell so both can be seen
+   on the same row without ambiguity. */
+.data-table td.multi-selected-cell {
+  box-shadow: inset 0 0 0 1px var(--multi);
+  background: var(--multi-soft);
+}
+
+.multi-select-panel {
+  padding: 0 18px 14px;
+}
+
+.empty-hint {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  padding: 10px 2px;
+}
+
+.multi-select-table th,
+.multi-select-table td {
+  white-space: nowrap;
+}
+
+.side-toggle.mini {
+  gap: 4px;
+}
+
+.side-toggle.mini .side-btn {
+  padding: 4px 10px;
+  font-size: 0.72rem;
+}
+
+.multi-select-qty {
+  width: 64px;
+  padding: 5px 8px;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+}
+
+.multi-select-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Date/Session selector — Today/past trading day navigation               */
+/* ---------------------------------------------------------------------- */
+
+.session-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  margin-bottom: 14px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  flex-wrap: wrap;
+}
+
+.session-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.session-nav-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.8rem;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.session-nav-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.session-nav-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.session-date-picker {
+  padding: 6px 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.85rem;
+}
+
+.session-date-label {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.session-today-btn {
+  padding: 6px 14px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  color: var(--accent);
+  font-weight: 600;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.session-today-btn:hover {
+  background: rgba(59, 130, 246, 0.25);
+}
+
+.session-mode-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.session-mode-live {
+  color: var(--green);
+  background: var(--green-soft);
+  border: 1px solid rgba(34, 197, 94, 0.35);
+}
+
+.session-mode-historical {
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+}
+
+.session-no-data {
+  padding: 10px 18px;
+  margin-bottom: 14px;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  border-radius: 10px;
+  color: var(--red);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.session-no-data.hidden {
+  display: none;
+}
+
+#historical-atm-panel.hidden {
+  display: none;
+}
+
+/* Historical (read-only) mode: trading actions are visually disabled across
+   the whole app rather than removed, so a past session still shows exactly
+   what was tradeable/selected that day — just non-interactive. */
+.app.is-historical #paper-config-form,
+.app.is-historical #multi-execute-btn,
+.app.is-historical .multi-select-checkbox,
+.app.is-historical .btn-execute-row,
+.app.is-historical .btn-close,
+.app.is-historical #multi-select-clear-btn,
+.app.is-historical .side-btn,
+.app.is-historical .multi-select-qty {
+  pointer-events: none;
+  opacity: 0.45;
+}
+
+.app.is-historical .call-cell,
+.app.is-historical .put-cell {
+  cursor: default;
+}

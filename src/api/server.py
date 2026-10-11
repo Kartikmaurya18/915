@@ -15,15 +15,7 @@ from src.config import load_config
 from src.engine import MarketEngine
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-FRONTEND_DIR = ROOT / "frontend"
-if not (FRONTEND_DIR / "index.html").exists():
-    for candidate in [Path.cwd() / "frontend", Path("/var/task/frontend")]:
-        if (candidate / "index.html").exists():
-            FRONTEND_DIR = candidate
-            ROOT = candidate.parent
-            break
-if not FRONTEND_DIR.exists():
-    FRONTEND_DIR.mkdir(parents=True, exist_ok=True)
+IS_SERVERLESS = bool(os.getenv("VERCEL") or os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
 
 app = FastAPI(title="Live Market Data", version="1.0.0")
 engine = MarketEngine(load_config())
@@ -292,18 +284,19 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         _ws_clients.discard(websocket)
 
 
-app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
+# In Vercel serverless environment, frontend static files are served directly from
+# the project root 'public/' directory by the Vercel CDN, eliminating the need for
+# FastAPI static file collection and preventing static collection warnings.
+# For standalone local development, FastAPI mounts static files and serves index.html.
+if not IS_SERVERLESS:
+    frontend_dir = ROOT / "public" if (ROOT / "public").exists() else ROOT / "frontend"
+    if frontend_dir.exists():
+        app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
 
-
-@app.get("/")
-async def index() -> FileResponse:
-    index_file = FRONTEND_DIR / "index.html"
-    if not index_file.exists():
-        for candidate in [Path.cwd() / "frontend" / "index.html", Path("/var/task/frontend/index.html")]:
-            if candidate.exists():
-                index_file = candidate
-                break
-    return FileResponse(index_file)
+    @app.get("/")
+    async def index() -> FileResponse:
+        index_file = ROOT / "public" / "index.html" if (ROOT / "public" / "index.html").exists() else ROOT / "frontend" / "index.html"
+        return FileResponse(index_file)
 
 
 @app.middleware("http")
@@ -320,7 +313,7 @@ async def no_cache_for_frontend(request, call_next):
     browser to ask every time rather than trusting a heuristic window.
     """
     global _loop
-    if not (os.getenv("VERCEL") or os.getenv("AWS_LAMBDA_FUNCTION_NAME")):
+    if not IS_SERVERLESS:
         if not engine.is_running:
             try:
                 _loop = asyncio.get_running_loop()

@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NIFTY Option Terminal</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/css/styles.css" />
+  <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+  <div class="app">
+    <div id="sim-banner" class="sim-banner hidden">
+      <span class="sim-banner-dot"></span>
+      <span id="sim-banner-text">SIMULATED MARKET DATA — mock ticks only. Paper trading is practice-only; no real Dhan orders are ever placed.</span>
+    </div>
+
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-dot"></span>
+        <div>
+          <h1 id="symbol-title">NIFTY</h1>
+          <p class="subtitle">Option Analytics Terminal · Simulation</p>
+        </div>
+      </div>
+
+      <div class="spot-panel">
+        <div class="spot-label">Underlying LTP</div>
+        <div class="spot-row">
+          <span id="spot-price" class="spot-price">—</span>
+          <span id="spot-change" class="spot-change neutral">—</span>
+        </div>
+        <div id="last-updated" class="meta">Waiting for data…</div>
+      </div>
+
+      <div class="status-panel">
+        <div class="badge-row">
+          <div id="conn-status" class="badge badge-offline">Offline</div>
+          <div id="stale-badge" class="badge badge-stale hidden">Stale</div>
+          <div id="session-badge" class="badge badge-session">—</div>
+        </div>
+        <div class="meta">Ticks: <span id="tick-count">0</span><span id="tick-reliability"></span></div>
+        <div class="meta">Source: <span id="data-source">—</span></div>
+        <div class="meta">Last tick: <span id="last-tick-age">—</span></div>
+      </div>
+    </header>
+
+    <div class="session-bar" id="session-bar">
+      <div class="session-nav">
+        <button type="button" id="session-prev-btn" class="session-nav-btn" title="Previous trading day" aria-label="Previous trading day">&#9664;</button>
+        <input type="date" id="session-date-picker" class="session-date-picker" />
+        <span id="session-date-label" class="session-date-label" aria-live="polite"></span>
+        <button type="button" id="session-next-btn" class="session-nav-btn" title="Next trading day" aria-label="Next trading day">&#9654;</button>
+        <button type="button" id="session-today-btn" class="session-today-btn">Today</button>
+      </div>
+      <div id="session-mode-badge" class="session-mode-badge session-mode-live">● LIVE</div>
+    </div>
+    <div id="session-no-data" class="session-no-data hidden">No data available for this trading session.</div>
+
+    <nav class="main-tabs" id="main-tabs">
+      <button class="main-tab active" data-view="overview">Overview</button>
+      <button class="main-tab" data-view="rrg">RRG</button>
+      <button class="main-tab" data-view="quality">Data Quality</button>
+      <button class="main-tab" data-view="logs">System Logs</button>
+      <button class="main-tab" data-view="settings">Settings</button>
+    </nav>
+
+    <!-- ============================== OVERVIEW ============================== -->
+    <section class="view" id="view-overview">
+      <section class="metrics-grid">
+        <article class="metric-card">
+          <span class="metric-label">Underlying LTP</span>
+          <span id="mo-ltp" class="metric-value">—</span>
+          <span class="metric-sub">Change <span id="mo-change">—</span></span>
+        </article>
+        <article class="metric-card">
+          <div class="metric-label-row">
+            <span class="metric-label">ATM Strike</span>
+            <span id="atm-method-chip" class="chip chip-mini">Δ 0.50</span>
+          </div>
+          <span id="atm-strike" class="metric-value">—</span>
+          <span id="atm-compare" class="metric-sub hidden">Nearest to spot: <strong id="atm-price-strike">—</strong></span>
+        </article>
+        <article class="metric-card">
+          <span class="metric-label">ATM Call (CE)</span>
+          <span id="atm-call" class="metric-value call">—</span>
+          <span class="metric-sub">Delta <span id="atm-call-delta">—</span></span>
+        </article>
+        <article class="metric-card">
+          <span class="metric-label">ATM Put (PE)</span>
+          <span id="atm-put" class="metric-value put">—</span>
+          <span class="metric-sub">Delta <span id="atm-put-delta">—</span></span>
+        </article>
+        <article class="metric-card highlight">
+          <span class="metric-label">ATM CE + PE</span>
+          <span id="atm-straddle" class="metric-value">—</span>
+        </article>
+        <article class="metric-card">
+          <span class="metric-label">Tick Count</span>
+          <span id="mo-ticks" class="metric-value">—</span>
+          <span class="metric-sub" id="mo-timestamp">—</span>
+        </article>
+      </section>
+
+      <main class="main-grid">
+        <section class="panel chart-panel">
+          <div class="panel-header">
+            <h2>Candlestick Chart</h2>
+            <div class="interval-tabs" id="interval-tabs">
+              <button class="tab active" data-interval="1">1m</button>
+              <button class="tab" data-interval="5">5m</button>
+              <button class="tab" data-interval="15">15m</button>
+            </div>
+          </div>
+          <div class="chart-wrap">
+            <div id="chart" class="chart-container"></div>
+            <div id="chart-tooltip" class="chart-tooltip hidden"></div>
+          </div>
+          <div class="active-candle" id="active-candle">
+            Building candle: —
+          </div>
+        </section>
+
+        <aside class="side-column">
+          <section class="panel">
+            <div class="panel-header">
+              <h2>Option Chain</h2>
+              <div class="chain-header-controls">
+                <span id="multi-select-count" class="chip chip-mini hidden">0 selected</span>
+                <button type="button" id="multi-select-clear-btn" class="btn btn-ghost btn-mini">Clear Selection</button>
+                <span id="chain-expiry" class="chip">—</span>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table class="data-table" id="option-chain-table">
+                <thead>
+                  <tr>
+                    <th class="chk-col" title="Select CE for multi-strike Paper Trading">Sel</th>
+                    <th>CE LTP</th>
+                    <th>CE Δ</th>
+                    <th>Strike</th>
+                    <th>PE Δ</th>
+                    <th>PE LTP</th>
+                    <th class="chk-col" title="Select PE for multi-strike Paper Trading">Sel</th>
+                    <th>CE+PE</th>
+                  </tr>
+                </thead>
+                <tbody id="option-chain-body">
+                  <tr><td colspan="8" class="empty">No chain data</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="chain-legend">
+              <span class="legend-item"><span class="legend-swatch atm-swatch"></span>Δ-selected ATM</span>
+              <span class="legend-item"><span class="legend-swatch price-swatch"></span>Nearest to spot</span>
+              <span class="legend-item straddle-hint">Check "Sel" boxes to build a multi-strike Paper Trading batch</span>
+            </div>
+          </section>
+
+          <!-- Historical mode only: the full multi-strike Option Chain grid
+               above reflects live state and isn't persisted tick-by-tick, so
+               a past session instead shows its recorded ATM-strike history
+               (what IS persisted — see PersistenceStore.option_chain_snapshots). -->
+          <section class="panel hidden" id="historical-atm-panel">
+            <div class="panel-header">
+              <h2>Session ATM History</h2>
+              <span class="chip chip-mini">Read-only</span>
+            </div>
+            <div class="table-wrap short">
+              <table class="data-table" id="historical-atm-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Strike</th>
+                    <th>CE LTP</th>
+                    <th>PE LTP</th>
+                    <th>CE+PE</th>
+                  </tr>
+                </thead>
+                <tbody id="historical-atm-body">
+                  <tr><td colspan="5" class="empty">No data</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <h2>Recent Candles</h2>
+              <span id="candle-interval-label" class="chip">1m</span>
+            </div>
+            <div class="table-wrap short">
+              <table class="data-table" id="candles-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>O</th>
+                    <th>H</th>
+                    <th>L</th>
+                    <th>C</th>
+                  </tr>
+                </thead>
+                <tbody id="candles-body">
+                  <tr><td colspan="5" class="empty">No candles yet</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </aside>
+      </main>
+
+      <section class="panel straddle-panel">
+        <div class="panel-header straddle-header">
+          <h2>ATM Straddle Chart</h2>
+          <div class="straddle-controls">
+            <div class="interval-tabs" id="straddle-view-tabs">
+              <button class="tab active" data-straddle-view="straddle">Straddle</button>
+              <button class="tab" data-straddle-view="ce">CE</button>
+              <button class="tab" data-straddle-view="pe">PE</button>
+            </div>
+            <div class="interval-tabs" id="straddle-interval-tabs">
+              <button class="tab active" data-straddle-interval="1">1m</button>
+              <button class="tab" data-straddle-interval="5">5m</button>
+              <button class="tab" data-straddle-interval="15">15m</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="straddle-summary">
+          <div class="straddle-value-block">
+            <span id="straddle-current-value" class="spot-price">—</span>
+            <span id="straddle-current-change" class="spot-change neutral">—</span>
+          </div>
+          <div class="straddle-meta">
+            <span class="meta">Strike <strong id="straddle-tracked-strike">—</strong></span>
+            <span class="meta">Expiry <strong id="straddle-expiry">—</strong></span>
+            <!-- Reads the SAME Multi-Strike Selection state as Paper Trading —
+                 no separate selected-contract state. Informational only
+                 (0 or 1 strike selected); the <select> takes over and this
+                 hides once 2+ distinct strikes are selected. -->
+            <span id="straddle-mode-chip" class="chip chip-mini straddle-mode-chip">● Following ATM</span>
+            <select id="straddle-focus-select" class="straddle-focus-select hidden" aria-label="Choose which selected strike the Straddle Chart displays"></select>
+            <select id="historical-strike-select" class="straddle-focus-select hidden" aria-label="Choose which strike's historical candles to view"></select>
+          </div>
+        </div>
+
+        <div class="chart-wrap">
+          <div id="straddle-chart" class="chart-container straddle-chart-container"></div>
+          <div id="straddle-chart-tooltip" class="chart-tooltip hidden"></div>
+        </div>
+
+        <div class="chain-legend">
+          <span class="legend-item"><span class="legend-swatch straddle-swatch"></span><span id="straddle-legend-label">Straddle = selected strike CE LTP + PE LTP</span></span>
+          <span class="legend-item straddle-hint">Follows the Multi-Strike Selection below (Option Chain checkboxes) — pick a strike there if more than one is selected</span>
+        </div>
+      </section>
+
+      <section class="panel trading-panel">
+        <div class="panel-header">
+          <h2>Paper Trading</h2>
+          <span class="chip chip-sim">SIMULATED · NO REAL ORDERS</span>
+        </div>
+
+        <div class="trading-body">
+          <div class="trading-controls">
+            <form id="paper-config-form" class="config-form">
+              <div class="field">
+                <label for="pt-tp">Take Profit %</label>
+                <input id="pt-tp" type="number" step="0.5" min="0.5" value="10" />
+              </div>
+              <div class="field">
+                <label for="pt-sl">Stop Loss %</label>
+                <input id="pt-sl" type="number" step="0.5" min="0.5" value="5" />
+              </div>
+              <div class="field">
+                <label for="pt-tp-amount">Profit Target ₹ <span class="scc-hint">(optional, additional)</span></label>
+                <input id="pt-tp-amount" type="number" step="1" min="0" placeholder="e.g. 500" />
+              </div>
+              <div class="field">
+                <label for="pt-sl-amount">Loss Limit ₹ <span class="scc-hint">(optional, additional)</span></label>
+                <input id="pt-sl-amount" type="number" step="1" min="0" placeholder="e.g. 200" />
+              </div>
+              <button type="submit" class="btn btn-ghost">Update TP/SL</button>
+            </form>
+          </div>
+
+          <div id="pt-error" class="pt-error hidden"></div>
+
+          <!-- The ONE selection system for Paper Trading — 1 checked
+               contract is a single-strike trade, 2+ is multi-strike; both
+               read/write the same state.multiSelected. No separate
+               "Selected Contract" section exists anymore. -->
+          <div class="panel-header inner-header">
+            <h3>Selected Contracts <span class="scc-hint">check CE/PE boxes in the Option Chain — 1 for a single trade, more for multi-strike</span></h3>
+            <div class="field default-qty-field">
+              <label for="default-qty">Default Qty</label>
+              <input id="default-qty" type="number" min="1" value="50" />
+            </div>
+          </div>
+          <div class="multi-select-panel">
+            <div id="multi-select-empty" class="empty-hint">
+              No contracts selected — check the "Sel" box next to any CE/PE price in the Option Chain to add it here (as many as you like), then Execute.
+            </div>
+            <div class="table-wrap short hidden" id="multi-select-table-wrap">
+              <table class="data-table wide multi-select-table" id="multi-select-table">
+                <thead>
+                  <tr>
+                    <th>Strike</th>
+                    <th>Type</th>
+                    <th>LTP</th>
+                    <th>Delta</th>
+                    <th>Expiry</th>
+                    <th>Side</th>
+                    <th>Qty</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="multi-select-body"></tbody>
+              </table>
+            </div>
+            <div class="multi-select-actions">
+              <button type="button" id="multi-execute-btn" class="btn btn-primary" disabled>Execute Selected</button>
+            </div>
+          </div>
+
+          <div class="panel-header inner-header">
+            <h3>P&amp;L Summary</h3>
+          </div>
+          <div class="stats-strip" id="pnl-summary-strip">
+            <div class="stat-tile">
+              <span class="stat-label">Open Positions</span>
+              <span id="pnls-open-count" class="stat-value">—</span>
+            </div>
+            <div class="stat-tile">
+              <span class="stat-label">Total Invested</span>
+              <span id="pnls-invested" class="stat-value">—</span>
+            </div>
+            <div class="stat-tile">
+              <span class="stat-label">Unrealized P&amp;L</span>
+              <span id="pnls-unrealized" class="stat-value">—</span>
+            </div>
+            <div class="stat-tile">
+              <span class="stat-label">Realized P&amp;L</span>
+              <span id="pnls-realized" class="stat-value">—</span>
+            </div>
+            <div class="stat-tile highlight">
+              <span class="stat-label">Total P&amp;L</span>
+              <span id="pnls-total" class="stat-value">—</span>
+            </div>
+            <div class="stat-tile">
+              <span class="stat-label">Total P&amp;L %</span>
+              <span id="pnls-total-percent" class="stat-value">—</span>
+            </div>
+            <div class="stat-tile">
+              <span class="stat-label">Buy Turnover</span>
+              <span id="pnls-buy-turnover" class="stat-value">—</span>
+            </div>
+            <div class="stat-tile">
+              <span class="stat-label">Sell Turnover</span>
+              <span id="pnls-sell-turnover" class="stat-value">—</span>
+            </div>
+            <div class="stat-tile">
+              <span class="stat-label">Total Turnover</span>
+              <span id="pnls-total-turnover" class="stat-value">—</span>
+            </div>
+            <div class="stat-tile">
+              <span class="stat-label">Open Position Value</span>
+              <span id="pnls-position-value" class="stat-value">—</span>
+            </div>
+          </div>
+
+          <div class="table-wrap">
+            <table class="data-table wide" id="positions-table">
+              <thead>
+                <tr>
+                  <th>Type</th>
+                  <th>Side</th>
+                  <th>Strike</th>
+                  <th>Qty</th>
+                  <th>Entry</th>
+                  <th>Current</th>
+                  <th>Value</th>
+                  <th>TP</th>
+                  <th>SL</th>
+                  <th>PT ₹</th>
+                  <th>SL ₹</th>
+                  <th>Dist→TP%</th>
+                  <th>Dist→SL%</th>
+                  <th>P&amp;L ₹</th>
+                  <th>P&amp;L %</th>
+                  <th>Opened</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="positions-body">
+                <tr><td colspan="17" class="empty">No open positions</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="panel-header inner-header">
+            <h3>Trade History</h3>
+          </div>
+
+          <div class="stats-strip" id="trade-stats">
+            <div class="stat-tile">
+              <span class="stat-label">Win Rate</span>
+              <span id="stat-winrate" class="stat-value">—</span>
+            </div>
+            <div class="stat-tile">
+              <span class="stat-label">Total P&amp;L</span>
+              <span id="stat-totalpnl" class="stat-value">—</span>
+            </div>
+            <div class="stat-tile">
+              <span class="stat-label">Avg Win</span>
+              <span id="stat-avgwin" class="stat-value">—</span>
+            </div>
+            <div class="stat-tile">
+              <span class="stat-label">Avg Loss</span>
+              <span id="stat-avgloss" class="stat-value">—</span>
+            </div>
+            <div class="stat-tile">
+              <span class="stat-label">Max Drawdown</span>
+              <span id="stat-drawdown" class="stat-value">—</span>
+            </div>
+            <div class="stat-tile">
+              <span class="stat-label">Trades</span>
+              <span id="stat-trades" class="stat-value">—</span>
+            </div>
+          </div>
+
+          <div class="table-wrap">
+            <table class="data-table wide" id="history-table">
+              <thead>
+                <tr>
+                  <th>Type</th>
+                  <th>Side</th>
+                  <th>Strike</th>
+                  <th>Qty</th>
+                  <th>Entry</th>
+                  <th>Exit</th>
+                  <th>P&amp;L ₹</th>
+                  <th>P&amp;L %</th>
+                  <th>Exit Reason</th>
+                  <th>Exited</th>
+                </tr>
+              </thead>
+              <tbody id="history-body">
+                <tr><td colspan="10" class="empty">No trade history yet</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </section>
+
+    <!-- ================================ RRG =================================== -->
+    <section class="view hidden" id="view-rrg">
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Relative Rotation Graph</h2>
+          <span class="chip chip-warn">Custom prototype methodology · not JdK-verified</span>
+        </div>
+        <div class="rrg-body">
+          <div class="rrg-plot-wrap">
+            <svg id="rrg-svg" viewBox="0 0 520 520" class="rrg-svg"></svg>
+          </div>
+          <div class="rrg-legend">
+            <div class="rrg-legend-item"><span class="rrg-dot quad-leading"></span>Leading</div>
+            <div class="rrg-legend-item"><span class="rrg-dot quad-weakening"></span>Weakening</div>
+            <div class="rrg-legend-item"><span class="rrg-dot quad-lagging"></span>Lagging</div>
+            <div class="rrg-legend-item"><span class="rrg-dot quad-improving"></span>Improving</div>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table wide" id="rrg-table">
+            <thead>
+              <tr>
+                <th>Strike</th>
+                <th>Type</th>
+                <th>RS</th>
+                <th>RS-Ratio</th>
+                <th>RS-Momentum</th>
+                <th>Quadrant</th>
+              </tr>
+            </thead>
+            <tbody id="rrg-body">
+              <tr><td colspan="6" class="empty">RRG not yet available — waiting for enough ticks</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+    <!-- ============================ DATA QUALITY =============================== -->
+    <section class="view hidden" id="view-quality">
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Data Quality</h2>
+        </div>
+        <div class="dq-grid">
+          <div class="dq-tile">
+            <span class="dq-label">Connection</span>
+            <span id="dq-connection" class="dq-value">—</span>
+          </div>
+          <div class="dq-tile">
+            <span class="dq-label">Source</span>
+            <span id="dq-source" class="dq-value">—</span>
+          </div>
+          <div class="dq-tile">
+            <span class="dq-label">Tick Count</span>
+            <span id="dq-tick-count" class="dq-value">—</span>
+          </div>
+          <div class="dq-tile">
+            <span class="dq-label">Tick Rate</span>
+            <span id="dq-tick-rate" class="dq-value">—</span>
+          </div>
+          <div class="dq-tile">
+            <span class="dq-label">Last Tick</span>
+            <span id="dq-last-tick" class="dq-value">—</span>
+          </div>
+          <div class="dq-tile">
+            <span class="dq-label">Stale?</span>
+            <span id="dq-stale" class="dq-value">—</span>
+          </div>
+          <div class="dq-tile">
+            <span class="dq-label">Market Session</span>
+            <span id="dq-session" class="dq-value">—</span>
+          </div>
+          <div class="dq-tile">
+            <span class="dq-label">Duplicate / Rejected Ticks</span>
+            <span id="dq-rejects" class="dq-value">—</span>
+          </div>
+          <div class="dq-tile">
+            <span class="dq-label">Option Chain Status</span>
+            <span id="dq-chain-status" class="dq-value">—</span>
+          </div>
+          <div class="dq-tile">
+            <span class="dq-label">Persistence</span>
+            <span id="dq-persistence" class="dq-value">—</span>
+          </div>
+        </div>
+      </section>
+    </section>
+
+    <!-- =============================== LOGS ===================================== -->
+    <section class="view hidden" id="view-logs">
+      <section class="panel">
+        <div class="panel-header">
+          <h2>System Logs</h2>
+          <div class="log-controls">
+            <select id="log-level-filter">
+              <option value="">All levels</option>
+              <option value="INFO">INFO</option>
+              <option value="ERROR">ERROR</option>
+            </select>
+            <label class="log-follow"><input type="checkbox" id="log-follow" checked /> Auto-follow</label>
+          </div>
+        </div>
+        <div class="table-wrap logs-wrap" id="logs-wrap">
+          <table class="data-table wide" id="logs-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Level</th>
+                <th>Event</th>
+                <th>Detail</th>
+              </tr>
+            </thead>
+            <tbody id="logs-body">
+              <tr><td colspan="4" class="empty">No log entries yet</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+    <!-- ============================== SETTINGS =================================== -->
+    <section class="view hidden" id="view-settings">
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Settings</h2>
+        </div>
+        <div class="settings-body">
+
+          <div class="settings-group">
+            <h3>Data Source</h3>
+            <p class="settings-hint">DHAN stays available as the future live provider behind the same pipeline. No real orders are ever placed.</p>
+            <form id="settings-source-form" class="settings-form">
+              <div class="field">
+                <label for="set-data-source">Source</label>
+                <select id="set-data-source">
+                  <option value="mock">Mock (live simulation)</option>
+                  <option value="replay">Replay / Test Mode</option>
+                  <option value="dhan">Dhan (live, pending subscription)</option>
+                  <option value="nse">NSE (live)</option>
+                </select>
+              </div>
+              <div class="field" id="replay-sequence-field">
+                <label for="set-replay-sequence">Sequence</label>
+                <select id="set-replay-sequence"></select>
+              </div>
+              <div class="field" id="replay-speed-field">
+                <label for="set-replay-speed">Speed</label>
+                <select id="set-replay-speed">
+                  <option value="0.5">0.5×</option>
+                  <option value="1" selected>1×</option>
+                  <option value="2">2×</option>
+                  <option value="5">5×</option>
+                  <option value="10">10×</option>
+                </select>
+              </div>
+              <button type="submit" class="btn btn-primary">Apply Data Source</button>
+            </form>
+            <div class="field readonly-field">
+              <label>Expiry</label>
+              <span id="set-expiry" class="readonly-value">—</span>
+            </div>
+          </div>
+
+          <div class="settings-group">
+            <h3>ATM Selection</h3>
+            <form id="settings-atm-form" class="settings-form">
+              <div class="field">
+                <label for="set-atm-method">Method</label>
+                <select id="set-atm-method">
+                  <option value="delta">Delta-based</option>
+                  <option value="price">Nearest to spot (price)</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="set-delta-threshold">Delta Tolerance</label>
+                <input id="set-delta-threshold" type="number" step="0.01" min="0.01" max="0.99" value="0.50" />
+              </div>
+              <button type="submit" class="btn btn-primary">Apply ATM Settings</button>
+            </form>
+          </div>
+
+          <div class="settings-group">
+            <h3>Paper Trading Risk</h3>
+            <form id="settings-risk-form" class="settings-form">
+              <div class="field">
+                <label for="set-tp">Take Profit %</label>
+                <input id="set-tp" type="number" step="0.5" min="0.5" value="10" />
+              </div>
+              <div class="field">
+                <label for="set-sl">Stop Loss %</label>
+                <input id="set-sl" type="number" step="0.5" min="0.5" value="5" />
+              </div>
+              <button type="submit" class="btn btn-primary">Apply TP/SL</button>
+            </form>
+          </div>
+
+          <div class="settings-group">
+            <h3>Candle Price Basis</h3>
+            <p class="settings-hint">Which price series builds the candlestick chart. Display choice only — does not change the CE+PE formula.</p>
+            <form id="settings-basis-form" class="settings-form">
+              <div class="field">
+                <label for="set-candle-basis">Basis</label>
+                <select id="set-candle-basis">
+                  <option value="underlying">Underlying Spot</option>
+                  <option value="combined_value">ATM Combined Value (CE+PE)</option>
+                </select>
+              </div>
+              <button type="submit" class="btn btn-primary">Apply Basis</button>
+            </form>
+          </div>
+
+          <div id="settings-status" class="settings-status hidden"></div>
+        </div>
+      </section>
+    </section>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
