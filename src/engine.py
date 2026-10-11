@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 from datetime import date, datetime
 from typing import Callable
@@ -161,7 +162,14 @@ class MarketEngine:
                 ensure_seeded(db_path, persistence_cfg.get("seed_db_path"))
             except Exception as e:
                 self._logger.log_error(e, {"context": "persistence_seed"})
-            self._persistence = PersistenceStore(db_path)
+            try:
+                self._persistence = PersistenceStore(db_path)
+            except Exception as e:
+                self._logger.log_error(e, {"context": "persistence_init"})
+                try:
+                    self._persistence = PersistenceStore("/tmp/market_data.db")
+                except Exception:
+                    self._persistence = None
 
         # RLock, not Lock: _build_snapshot() calls get_settings(), which
         # re-acquires this same lock from the thread that already holds it
@@ -229,7 +237,27 @@ class MarketEngine:
             return []
         return self._persistence.get_recent_option_chain_snapshots(self.underlying, limit)
 
+    def tick_once(self) -> dict | None:
+        """Process one mock tick on-demand (used in serverless environments)."""
+        try:
+            chain = self._source.fetch_option_chain() if hasattr(self._source, "fetch_option_chain") else None
+            spot = float(chain["records"]["underlyingValue"]) if chain else self._source.get_underlying_ltp()
+            from src.timeutil import now_ist
+            tick = PriceTick(
+                symbol=self.underlying,
+                price=spot,
+                timestamp=now_ist(self.cfg.get("timezone", "Asia/Kolkata")),
+                provider=self._source.provider_name,
+                exchange=getattr(self._source, "spec", None).exchange if hasattr(self._source, "spec") else "NSE",
+            )
+            return self._process_tick_data(tick)
+        except Exception as e:
+            self._logger.log_error(e, {"context": "tick_once"})
+            return None
+
     def get_snapshot(self) -> dict:
+        if os.getenv("VERCEL") or os.getenv("AWS_LAMBDA_FUNCTION_NAME"):
+            self.tick_once()
         with self._lock:
             return self._build_snapshot(completed=[])
 
@@ -575,6 +603,132 @@ class MarketEngine:
             self.start()
         return self.get_settings()
 
+    def _process_tick_data(self, tick: PriceTick) -> dict:
+        self._last_accepted_timestamp = tick.timestamp
+        self._latest_market_session = get_market_session_status(
+            tick.timestamp,
+            session_start=self.session_start,
+            session_end=self.session_end,
+            timezone=self.cfg.get("timezone", "Asia/Kolkata"),
+        )
+
+        # Log incoming price tick
+        self._logger.log_price_tick(tick, {"source": self._source.provider_name})
+
+        try:
+            # Normalized chain straight from the provider, then Greeks
+            # (provider-supplied today; see option_chain/greeks.py).
+            chain = self._greeks.enrich(self._source.get_option_chain())
+
+            # ATM selection: Delta-based (Greeks, default) with automatic
+            # fallback to price-based if the chain carries no Greeks;
+            # "price" mode uses price-based directly. Either way, the
+            # price-based strike is attached for on-screen comparison.
+            price_atm = find_atm_strike(chain)
+            if self.atm_method == "delta":
+                atm = find_atm_strike_delta(chain, delta_threshold=self.delta_threshold)
+                if atm is None:
+                    atm = price_atm
+            else:
+                atm = price_atm
+            if atm is not None and atm.price_based_strike is None:
+                atm.price_based_strike = price_atm.strike if price_atm else None
+
+            # Log ATM update
+            if atm:
+                self._logger.log_atm_update(
+                    {
+                        "strike": atm.strike,
+                        "call_ltp": atm.call_ltp,
+                        "put_ltp": atm.put_ltp,
+                        "straddle_premium": atm.straddle_premium,
+                    }
+                )
+        except Exception as e:
+            self._logger.log_error(e, {"context": "option_chain_fetch"})
+            atm = self._latest_atm
+            chain = self._latest_chain
+
+        with self._lock:
+            self._latest_tick = tick
+            self._latest_atm = atm
+            self._latest_chain = chain
+            self._latest_calculated_prices = self._price_calculator.calculate(atm) if atm else None
+
+            # Log calculated prices
+            if self._latest_calculated_prices:
+                self._logger.log_calculated_prices(self._latest_calculated_prices)
+
+            # Update RRG calculator if enabled
+            if self._rrg_calculator and chain:
+                try:
+                    self._rrg_calculator.update(tick, chain)
+                    self._latest_rrg_snapshot = self._rrg_calculator.calculate_rrg()
+                except Exception as e:
+                    self._logger.log_error(e, {"context": "rrg_calculation"})
+
+            # Mark paper (simulated) positions to market and auto-exit
+            # on TP/SL. Never touches a real order — see paper_trading.py.
+            try:
+                paper_exits = self._paper_trading.update(chain, tick.timestamp)
+                for pos in paper_exits:
+                    self._logger.log_system_event(
+                        "paper_position_exit",
+                        {
+                            "id": pos.id,
+                            "option_type": pos.option_type,
+                            "strike": pos.strike,
+                            "exit_reason": pos.exit_reason,
+                            "pnl": pos.pnl,
+                            "pnl_percent": pos.pnl_percent,
+                            "simulated": True,
+                        },
+                    )
+                    self._persist_paper_trade(pos)
+            except Exception as e:
+                self._logger.log_error(e, {"context": "paper_trading_update"})
+
+            self._tick_count += 1
+            candle_tick = tick
+            if self.candle_price_basis == "combined_value" and self._latest_calculated_prices:
+                combined_value = self._latest_calculated_prices.get("combined_value")
+                if combined_value is not None:
+                    candle_tick = PriceTick(
+                        symbol=tick.symbol,
+                        price=combined_value,
+                        timestamp=tick.timestamp,
+                        volume=tick.volume,
+                    )
+            completed = self._aggregator.process_tick(candle_tick)
+            completed_strike_candles = self._strike_candle_engine.process(chain, tick.timestamp)
+
+            # Log completed candles
+            for candle in completed:
+                self._logger.log_candle_completed(candle)
+
+            # Persist (optional — see `persistence.enabled` in config).
+            # Every write here is additionally grouped by its
+            # Asia/Kolkata trading date (see src/timeutil.py), which
+            # is what backs the historical Date/Session selector.
+            if self._persistence is not None:
+                try:
+                    for candle in completed:
+                        self._persistence.save_candle(candle)
+                    for candle in completed_strike_candles:
+                        self._persistence.save_candle(candle)
+                    if chain is not None and (
+                        self._last_chain_persist_at is None
+                        or (tick.timestamp - self._last_chain_persist_at).total_seconds()
+                        >= self._chain_persist_interval
+                    ):
+                        self._persistence.save_option_chain_snapshot(chain, atm)
+                        self._last_chain_persist_at = tick.timestamp
+                except Exception as e:
+                    self._logger.log_error(e, {"context": "persistence_write"})
+
+            snapshot = self._build_snapshot(completed=completed)
+            return snapshot
+
     def _tick_worker(self) -> None:
         try:
             self._logger.log_system_event("engine_started", {"underlying": self.underlying})
@@ -598,129 +752,9 @@ class MarketEngine:
                         {"reason": validation.reason, "timestamp": str(tick.timestamp if tick else None)},
                     )
                     continue
-                self._last_accepted_timestamp = tick.timestamp
-                self._latest_market_session = get_market_session_status(
-                    tick.timestamp,
-                    session_start=self.session_start,
-                    session_end=self.session_end,
-                    timezone=self.cfg.get("timezone", "Asia/Kolkata"),
-                )
 
-                # Log incoming price tick
-                self._logger.log_price_tick(tick, {"source": self._source.provider_name})
-
-                try:
-                    # Normalized chain straight from the provider, then Greeks
-                    # (provider-supplied today; see option_chain/greeks.py).
-                    chain = self._greeks.enrich(self._source.get_option_chain())
-
-                    # ATM selection: Delta-based (Greeks, default) with automatic
-                    # fallback to price-based if the chain carries no Greeks;
-                    # "price" mode uses price-based directly. Either way, the
-                    # price-based strike is attached for on-screen comparison.
-                    price_atm = find_atm_strike(chain)
-                    if self.atm_method == "delta":
-                        atm = find_atm_strike_delta(chain, delta_threshold=self.delta_threshold)
-                        if atm is None:
-                            atm = price_atm
-                    else:
-                        atm = price_atm
-                    if atm is not None and atm.price_based_strike is None:
-                        atm.price_based_strike = price_atm.strike if price_atm else None
-
-                    # Log ATM update
-                    if atm:
-                        self._logger.log_atm_update(
-                            {
-                                "strike": atm.strike,
-                                "call_ltp": atm.call_ltp,
-                                "put_ltp": atm.put_ltp,
-                                "straddle_premium": atm.straddle_premium,
-                            }
-                        )
-                except Exception as e:
-                    self._logger.log_error(e, {"context": "option_chain_fetch"})
-                    atm = self._latest_atm
-                    chain = self._latest_chain
-
+                snapshot = self._process_tick_data(tick)
                 with self._lock:
-                    self._latest_tick = tick
-                    self._latest_atm = atm
-                    self._latest_chain = chain
-                    self._latest_calculated_prices = self._price_calculator.calculate(atm) if atm else None
-
-                    # Log calculated prices
-                    if self._latest_calculated_prices:
-                        self._logger.log_calculated_prices(self._latest_calculated_prices)
-
-                    # Update RRG calculator if enabled
-                    if self._rrg_calculator and chain:
-                        try:
-                            self._rrg_calculator.update(tick, chain)
-                            self._latest_rrg_snapshot = self._rrg_calculator.calculate_rrg()
-                        except Exception as e:
-                            self._logger.log_error(e, {"context": "rrg_calculation"})
-
-                    # Mark paper (simulated) positions to market and auto-exit
-                    # on TP/SL. Never touches a real order — see paper_trading.py.
-                    try:
-                        paper_exits = self._paper_trading.update(chain, tick.timestamp)
-                        for pos in paper_exits:
-                            self._logger.log_system_event(
-                                "paper_position_exit",
-                                {
-                                    "id": pos.id,
-                                    "option_type": pos.option_type,
-                                    "strike": pos.strike,
-                                    "exit_reason": pos.exit_reason,
-                                    "pnl": pos.pnl,
-                                    "pnl_percent": pos.pnl_percent,
-                                    "simulated": True,
-                                },
-                            )
-                            self._persist_paper_trade(pos)
-                    except Exception as e:
-                        self._logger.log_error(e, {"context": "paper_trading_update"})
-
-                    self._tick_count += 1
-                    candle_tick = tick
-                    if self.candle_price_basis == "combined_value" and self._latest_calculated_prices:
-                        combined_value = self._latest_calculated_prices.get("combined_value")
-                        if combined_value is not None:
-                            candle_tick = PriceTick(
-                                symbol=tick.symbol,
-                                price=combined_value,
-                                timestamp=tick.timestamp,
-                                volume=tick.volume,
-                            )
-                    completed = self._aggregator.process_tick(candle_tick)
-                    completed_strike_candles = self._strike_candle_engine.process(chain, tick.timestamp)
-
-                    # Log completed candles
-                    for candle in completed:
-                        self._logger.log_candle_completed(candle)
-
-                    # Persist (optional — see `persistence.enabled` in config).
-                    # Every write here is additionally grouped by its
-                    # Asia/Kolkata trading date (see src/timeutil.py), which
-                    # is what backs the historical Date/Session selector.
-                    if self._persistence is not None:
-                        try:
-                            for candle in completed:
-                                self._persistence.save_candle(candle)
-                            for candle in completed_strike_candles:
-                                self._persistence.save_candle(candle)
-                            if chain is not None and (
-                                self._last_chain_persist_at is None
-                                or (tick.timestamp - self._last_chain_persist_at).total_seconds()
-                                >= self._chain_persist_interval
-                            ):
-                                self._persistence.save_option_chain_snapshot(chain, atm)
-                                self._last_chain_persist_at = tick.timestamp
-                        except Exception as e:
-                            self._logger.log_error(e, {"context": "persistence_write"})
-
-                    snapshot = self._build_snapshot(completed=completed)
                     subscribers = list(self._subscribers)
 
                 for callback in subscribers:

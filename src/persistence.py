@@ -50,8 +50,11 @@ def ensure_seeded(db_path: str | Path, seed_db_path: str | Path | None) -> None:
     seed_db_path = Path(seed_db_path)
     if db_path.exists() or not seed_db_path.exists():
         return
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(seed_db_path, db_path)
+    try:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(seed_db_path, db_path)
+    except OSError:
+        pass
 
 
 class PersistenceStore:
@@ -61,11 +64,18 @@ class PersistenceStore:
 
     def __init__(self, db_path: str | Path):
         self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._init_schema()
+        try:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            self._init_schema()
+        except (OSError, sqlite3.Error):
+            self.db_path = Path("/tmp") / Path(db_path).name
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            self._init_schema()
 
     def _init_schema(self) -> None:
         with self._lock:

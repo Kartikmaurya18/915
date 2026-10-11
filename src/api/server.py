@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -15,6 +16,14 @@ from src.engine import MarketEngine
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 FRONTEND_DIR = ROOT / "frontend"
+if not (FRONTEND_DIR / "index.html").exists():
+    for candidate in [Path.cwd() / "frontend", Path("/var/task/frontend")]:
+        if (candidate / "index.html").exists():
+            FRONTEND_DIR = candidate
+            ROOT = candidate.parent
+            break
+if not FRONTEND_DIR.exists():
+    FRONTEND_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="Live Market Data", version="1.0.0")
 engine = MarketEngine(load_config())
@@ -24,6 +33,8 @@ _loop: asyncio.AbstractEventLoop | None = None
 
 def _broadcast(snapshot: dict) -> None:
     if _loop is None or not _ws_clients:
+        return
+    if getattr(_loop, "is_closed", lambda: True)():
         return
     payload = json.dumps(snapshot)
 
@@ -37,15 +48,23 @@ def _broadcast(snapshot: dict) -> None:
         for ws in dead:
             _ws_clients.discard(ws)
 
-    asyncio.run_coroutine_threadsafe(_send_all(), _loop)
+    try:
+        asyncio.run_coroutine_threadsafe(_send_all(), _loop)
+    except Exception:
+        pass
 
 
 @app.on_event("startup")
 async def startup() -> None:
     global _loop
-    _loop = asyncio.get_running_loop()
+    try:
+        _loop = asyncio.get_running_loop()
+    except RuntimeError:
+        pass
     engine.subscribe(_broadcast)
-    engine.start()
+    # Only start background tick thread in persistent server mode (not in Vercel serverless)
+    if not (os.getenv("VERCEL") or os.getenv("AWS_LAMBDA_FUNCTION_NAME")):
+        engine.start()
 
 
 @app.on_event("shutdown")
@@ -278,7 +297,13 @@ app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 
 @app.get("/")
 async def index() -> FileResponse:
-    return FileResponse(FRONTEND_DIR / "index.html")
+    index_file = FRONTEND_DIR / "index.html"
+    if not index_file.exists():
+        for candidate in [Path.cwd() / "frontend" / "index.html", Path("/var/task/frontend/index.html")]:
+            if candidate.exists():
+                index_file = candidate
+                break
+    return FileResponse(index_file)
 
 
 @app.middleware("http")
@@ -295,13 +320,14 @@ async def no_cache_for_frontend(request, call_next):
     browser to ask every time rather than trusting a heuristic window.
     """
     global _loop
-    if not engine.is_running:
-        try:
-            _loop = asyncio.get_running_loop()
-            engine.subscribe(_broadcast)
-        except RuntimeError:
-            pass
-        engine.start()
+    if not (os.getenv("VERCEL") or os.getenv("AWS_LAMBDA_FUNCTION_NAME")):
+        if not engine.is_running:
+            try:
+                _loop = asyncio.get_running_loop()
+                engine.subscribe(_broadcast)
+            except RuntimeError:
+                pass
+            engine.start()
     response = await call_next(request)
     if request.url.path == "/" or request.url.path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-cache, must-revalidate"
