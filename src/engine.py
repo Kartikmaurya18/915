@@ -179,6 +179,7 @@ class MarketEngine:
         self._worker: threading.Thread | None = None
         self._worker_error: Exception | None = None
         self._subscribers: list[UpdateCallback] = []
+        self._chain_listeners: list = []
 
         self._latest_tick: PriceTick | None = None
         self._latest_atm: ATMResult | None = None
@@ -399,19 +400,16 @@ class MarketEngine:
         leg = chain.get_leg(strike)
         return leg.ltp(option_type) if leg is not None else None
 
-    def open_paper_position(
+    def resolve_paper_quote(
         self,
         option_type: str,
         strike: float | None = None,
-        quantity: int = 50,
-        side: str = "BUY",
         expiry: str | None = None,
         underlying: str | None = None,
-    ) -> PaperPosition:
-        """Open a SIMULATED position on a contract from the current Option
-        Chain (the source of truth for contract selection). `expiry`/
-        `underlying`, when given, must match the chain — so a selection made
-        against one chain can't silently fill against a different contract."""
+    ):
+        """Validate a contract selection against the current Option Chain and
+        return `(OptionQuote, fill_timestamp)`. Shared by the global paper
+        book and the per-user books so both fill from the same chain."""
         option_type = (option_type or "").upper()
         if option_type not in ("CE", "PE"):
             raise ValueError("option_type must be 'CE' or 'PE'.")
@@ -435,6 +433,43 @@ class MarketEngine:
             if quote is None:
                 raise ValueError(f"Strike {strike} not found in the current option chain.")
             timestamp = tick.timestamp if tick else now_ist()
+        return quote, timestamp
+
+    def latest_tick_time(self):
+        """Timestamp of the latest accepted tick, or now (IST) before the first one."""
+        with self._lock:
+            return self._latest_tick.timestamp if self._latest_tick else now_ist()
+
+    def current_leg_price(self, option_type: str, strike: float):
+        """Current CE/PE premium for `strike`, or None if not in the chain."""
+        with self._lock:
+            return self._current_leg_price(option_type, strike)
+
+    def add_chain_listener(self, callback) -> None:
+        """Register `callback(chain, timestamp)`, called once per accepted tick
+        after the option chain is built. Used by the per-user paper service to
+        mark every user's book to market and fire their TP/SL exits."""
+        if callback not in self._chain_listeners:
+            self._chain_listeners.append(callback)
+
+    def remove_chain_listener(self, callback) -> None:
+        if callback in self._chain_listeners:
+            self._chain_listeners.remove(callback)
+
+    def open_paper_position(
+        self,
+        option_type: str,
+        strike: float | None = None,
+        quantity: int = 50,
+        side: str = "BUY",
+        expiry: str | None = None,
+        underlying: str | None = None,
+    ) -> PaperPosition:
+        """Open a SIMULATED position on a contract from the current Option
+        Chain (the source of truth for contract selection). `expiry`/
+        `underlying`, when given, must match the chain — so a selection made
+        against one chain can't silently fill against a different contract."""
+        quote, timestamp = self.resolve_paper_quote(option_type, strike, expiry, underlying)
         result = self._execution.place_order(
             OrderRequest(
                 contract=quote.contract,
@@ -687,6 +722,14 @@ class MarketEngine:
                     self._persist_paper_trade(pos)
             except Exception as e:
                 self._logger.log_error(e, {"context": "paper_trading_update"})
+
+            # Per-user paper books (see src/paper/service.py). A failing
+            # listener must never break the tick pipeline.
+            for listener in list(self._chain_listeners):
+                try:
+                    listener(chain, tick.timestamp)
+                except Exception as e:
+                    self._logger.log_error(e, {"context": "chain_listener"})
 
             self._tick_count += 1
             candle_tick = tick

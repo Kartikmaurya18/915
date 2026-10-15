@@ -1,0 +1,46 @@
+# Local development stack: the app plus a throwaway PostgreSQL.
+#   docker compose up --build
+# Never point this at production data. Real secrets come from your own .env or a
+# secret manager - the values below are development placeholders only.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: marketdata
+      POSTGRES_PASSWORD: dev-only-password
+      POSTGRES_DB: marketdata
+    ports:
+      - "55432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U marketdata -d marketdata"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: postgresql://marketdata:dev-only-password@db:5432/marketdata
+    depends_on:
+      db:
+        condition: service_healthy
+
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://marketdata:dev-only-password@db:5432/marketdata
+      AUTH_MODE: required
+      JWT_SECRET: dev-only-jwt-secret-change-me-0123456789abcdef
+      MARKET_DATA_PROVIDER: mock
+      POLL_INTERVAL_SECONDS: "1"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:
