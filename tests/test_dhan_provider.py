@@ -115,27 +115,25 @@ def test_dhan_credentials_masking():
         assert masked != "test_client_123"
 
 
-def test_dhan_integration_with_engine():
-    """Test that Dhan provider integrates with engine build function."""
+def test_dhan_live_provider_is_disabled_in_engine(monkeypatch):
+    """The registry deliberately refuses the live Dhan provider (MOCK-only deployment).
+
+    The DhanMarketDataProvider class itself stays importable and unit-tested above;
+    only the engine/registry wiring is switched off (see src/data_sources/registry.py).
+    """
     from src.engine import build_data_source
-    
-    os.environ["DHAN_CLIENT_ID"] = "test_client_123"
-    os.environ["DHAN_ACCESS_TOKEN"] = "test_token_abc"
-    
-    with patch("src.data_sources.dhan.dhanhq") as mock_dhanhq:
-        mock_client = Mock()
-        mock_dhanhq.return_value = mock_client
-        
-        cfg = {
-            "underlying": "NIFTY",
-            "data_source": "dhan",
-            "poll_interval_seconds": 5,
-        }
-        
-        source = build_data_source(cfg)
-        
-        assert isinstance(source, DhanMarketDataProvider)
-        assert source.underlying == "NIFTY"
+
+    monkeypatch.setenv("DHAN_CLIENT_ID", "test_client_123")
+    monkeypatch.setenv("DHAN_ACCESS_TOKEN", "test_token_abc")
+
+    cfg = {
+        "underlying": "NIFTY",
+        "data_source": "dhan",
+        "poll_interval_seconds": 5,
+    }
+
+    with pytest.raises(RuntimeError, match="disabled"):
+        build_data_source(cfg)
 
 
 if __name__ == "__main__":

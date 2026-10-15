@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -17,10 +18,51 @@ from src.engine import MarketEngine
 ROOT = Path(__file__).resolve().parent.parent.parent
 IS_SERVERLESS = bool(os.getenv("VERCEL") or os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
 
-app = FastAPI(title="Live Market Data", version="1.0.0")
 engine = MarketEngine(load_config())
 _ws_clients: set[WebSocket] = set()
 _loop: asyncio.AbstractEventLoop | None = None
+
+
+def _ensure_engine_running() -> None:
+    """Bind the broadcast callback to the running loop and start the tick thread.
+
+    Idempotent: unsubscribing first guarantees `_broadcast` is registered exactly
+    once even if this runs again (e.g. restarting a crashed worker), so clients
+    never receive duplicate snapshots. No-op on serverless hosts, where ticks are
+    driven per request instead of by a background thread.
+    """
+    global _loop
+    if IS_SERVERLESS:
+        return
+    try:
+        _loop = asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    engine.unsubscribe(_broadcast)
+    engine.subscribe(_broadcast)
+    engine.start()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    global _loop
+    try:
+        _loop = asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    engine.unsubscribe(_broadcast)
+    engine.subscribe(_broadcast)
+    # Only start the background tick thread in persistent-server mode (not serverless).
+    if not IS_SERVERLESS:
+        engine.start()
+    try:
+        yield
+    finally:
+        engine.unsubscribe(_broadcast)
+        engine.close()
+
+
+app = FastAPI(title="Live Market Data", version="1.0.0", lifespan=lifespan)
 
 
 def _broadcast(snapshot: dict) -> None:
@@ -44,25 +86,6 @@ def _broadcast(snapshot: dict) -> None:
         asyncio.run_coroutine_threadsafe(_send_all(), _loop)
     except Exception:
         pass
-
-
-@app.on_event("startup")
-async def startup() -> None:
-    global _loop
-    try:
-        _loop = asyncio.get_running_loop()
-    except RuntimeError:
-        pass
-    engine.subscribe(_broadcast)
-    # Only start background tick thread in persistent server mode (not in Vercel serverless)
-    if not (os.getenv("VERCEL") or os.getenv("AWS_LAMBDA_FUNCTION_NAME")):
-        engine.start()
-
-
-@app.on_event("shutdown")
-async def shutdown() -> None:
-    engine.unsubscribe(_broadcast)
-    engine.close()
 
 
 @app.get("/api/health")
@@ -312,15 +335,8 @@ async def no_cache_for_frontend(request, call_next):
     existing ETag/Last-Modified (still enables a cheap 304) but require the
     browser to ask every time rather than trusting a heuristic window.
     """
-    global _loop
-    if not IS_SERVERLESS:
-        if not engine.is_running:
-            try:
-                _loop = asyncio.get_running_loop()
-                engine.subscribe(_broadcast)
-            except RuntimeError:
-                pass
-            engine.start()
+    if not IS_SERVERLESS and not engine.is_running:
+        _ensure_engine_running()
     response = await call_next(request)
     if request.url.path == "/" or request.url.path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-cache, must-revalidate"
