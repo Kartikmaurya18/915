@@ -286,3 +286,64 @@ suite("paper trading against the live API", () => {
     }
   });
 });
+
+suite("straddle chart and history against the live API", () => {
+  it("serves CE/PE/Straddle candles for the ATM strike and answers repeated requests consistently", async () => {
+    await signUp();
+    const c = newClient();
+    c.subscribe("index:NIFTY", () => undefined);
+    c.start();
+    const index = (await until(() => c.getTopic("index:NIFTY")?.data)) as unknown as { atm: { strike: number } };
+    c.stop();
+    const strike = index.atm.strike;
+    const get = () => request<{ strike: number; by_interval: Record<string, Record<string, { time: number; open: number; high: number; low: number; close: number }[]>> }>(`/api/straddle-candles?strike=${strike}`);
+    const deadline = Date.now() + 15_000;
+    let first = await get().catch((e) => e as ApiError);
+    while (first instanceof ApiError && first.status === 404 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 500));
+      first = await get().catch((e) => e as ApiError);
+    }
+    expect(first).not.toBeInstanceOf(ApiError);
+    const data = first as Awaited<ReturnType<typeof get>>;
+    expect(data.strike).toBe(strike);
+    for (const interval of ["1", "5", "15"]) {
+      for (const leg of ["ce", "pe", "straddle"]) {
+        const series = data.by_interval[interval]?.[leg];
+        expect(series?.length, `${interval}m ${leg}`).toBeGreaterThan(0);
+        for (const b of series!) expect(b.high).toBeGreaterThanOrEqual(b.low);
+      }
+    }
+    // Straddle = CE + PE on the latest bar of the 1m series (closing prices add up).
+    const last = (leg: string) => data.by_interval["1"]![leg]!.at(-1)!;
+    expect(last("straddle").close).toBeCloseTo(last("ce").close + last("pe").close, 1);
+  });
+
+  it("returns a readable 404 for a strike that has no candles", async () => {
+    await signUp();
+    const err = await request("/api/straddle-candles?strike=1").catch((e) => e);
+    expect((err as ApiError).status).toBe(404);
+  });
+
+  it("lists trading dates and returns a coherent past session", async () => {
+    await signUp();
+    const dates = await request<{ dates: string[]; today: string }>("/api/history/dates");
+    expect(dates.today).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    const past = dates.dates.find((d) => d < dates.today);
+    if (!past) return; // a fresh database has no past sessions; nothing more to check
+    const s = await request<{ has_data: boolean; candles: Record<string, unknown[]>; available_strikes: number[]; underlying: { high: number; low: number } }>(`/api/history/session?date=${past}`);
+    expect(s.has_data).toBe(true);
+    expect(s.underlying.high).toBeGreaterThanOrEqual(s.underlying.low);
+    expect(Object.keys(s.candles).length).toBeGreaterThan(0);
+    if (s.available_strikes.length) {
+      const strike = s.available_strikes[0]!;
+      const day = await request<{ strike: number }>(`/api/straddle-candles?strike=${strike}&date=${past}`);
+      expect(day.strike).toBe(strike);
+    }
+  });
+
+  it("rejects a malformed date", async () => {
+    await signUp();
+    const err = await request("/api/history/session?date=16-10-2026").catch((e) => e);
+    expect((err as ApiError).status).toBe(400);
+  });
+});

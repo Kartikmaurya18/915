@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { createChart, type IChartApi, type ISeriesApi, type UTCTimestamp } from "lightweight-charts";
-import type { Candle } from "../api/types";
+import type { Bar } from "../api/types";
 
 function cssVar(name: string, fallback: string): string {
   const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -36,7 +36,7 @@ function themeOptions() {
   };
 }
 
-const toBar = (c: Candle) => ({
+const toBar = (c: Bar) => ({
   time: c.time as UTCTimestamp,
   open: c.open,
   high: c.high,
@@ -48,7 +48,7 @@ const toBar = (c: Candle) => ({
  * Candlestick chart. `series` is the full ordered list; the common tick only changes the last bar,
  * so that case uses `update()` and everything else (first load, new interval) uses `setData()`.
  */
-export function CandleChart({ series, resetKey }: { series: Candle[]; resetKey: string }) {
+export function CandleChart({ series, resetKey }: { series: Bar[]; resetKey: string }) {
   const host = useRef<HTMLDivElement>(null);
   const chart = useRef<IChartApi | null>(null);
   const bars = useRef<ISeriesApi<"Candlestick"> | null>(null);

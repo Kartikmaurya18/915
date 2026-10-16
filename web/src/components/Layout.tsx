@@ -5,6 +5,7 @@ import { StatusPill } from "./StatusPill";
 const NAV: { to: string; label: string; admin?: boolean }[] = [
   { to: "/", label: "Overview" },
   { to: "/trading", label: "Paper Trading" },
+  { to: "/history", label: "History" },
   { to: "/rrg", label: "RRG" },
   { to: "/quality", label: "Data Quality" },
   { to: "/logs", label: "Logs", admin: true },

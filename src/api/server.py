@@ -12,12 +12,14 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 
 from src.api.auth_routes import router as auth_router
+from src.api.readcache import ReadCache
 from src.api.spa import install_spa, spa_dist
 from src.auth import settings as auth_settings
 from src.auth.deps import AuthUser, authenticate_token, current_user, require_admin
@@ -37,6 +39,7 @@ from src.realtime.publisher import TopicPublisher
 from src.realtime.redis_bus import RedisSubscriber
 from src.realtime.topics import merge_topics
 from src.serializers import summarize_persisted_paper_trades
+from src.timeutil import today_ist
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 IS_SERVERLESS = bool(os.getenv("VERCEL") or os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
@@ -125,6 +128,23 @@ async def engine_call(method: str, *args, **kwargs):
     return await asyncio.to_thread(getattr(engine, method), *args, **kwargs)
 
 
+# Read-only engine answers many users ask for repeatedly. Short TTLs keep the load on the engine (or,
+# in gateway mode, on the ingestor's control channel) independent of the number of viewers.
+read_cache = ReadCache()
+LIVE_TTL_SECONDS = 2.0  # data that is still changing (today, the live strike)
+PAST_TTL_SECONDS = 60.0  # a finished trading session does not change
+DATES_TTL_SECONDS = 10.0
+
+
+def _session_ttl(date: str) -> float:
+    return LIVE_TTL_SECONDS if date >= today_ist().isoformat() else PAST_TTL_SECONDS
+
+
+async def cached_engine_call(ttl: float, method: str, *args):
+    """`engine_call` through the read cache. The result is shared: never mutate it."""
+    return await read_cache.get((method, args), ttl, lambda: engine_call(method, *args))
+
+
 def _ensure_engine_running() -> None:
     """Bind the broadcast callback to the running loop and start the tick thread.
 
@@ -208,6 +228,10 @@ if _cors_origins:
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type", "Idempotency-Key", "X-Requested-With"],
     )
+
+
+# History and straddle responses can be hundreds of KB of repetitive JSON; WebSocket traffic is unaffected.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 
 @app.exception_handler(AuthError)
@@ -341,14 +365,14 @@ async def history_candles(interval: int = 1, limit: int = 200, _user: AuthUser =
     """Completed candles read back from the persistence store (empty list if disabled)."""
     return {
         "interval_minutes": interval,
-        "candles": await engine_call("get_persisted_candles", interval, min(max(limit, 1), 5000)),
+        "candles": await cached_engine_call(5.0, "get_persisted_candles", interval, min(max(limit, 1), 5000)),
     }
 
 
 @app.get("/api/history/option-chain")
 async def history_option_chain(limit: int = 200, _user: AuthUser = Depends(current_user)) -> dict:
     """Recent option chain/ATM snapshots read back from the persistence store."""
-    return {"snapshots": await engine_call("get_persisted_option_chain_snapshots", min(max(limit, 1), 5000))}
+    return {"snapshots": await cached_engine_call(5.0, "get_persisted_option_chain_snapshots", min(max(limit, 1), 5000))}
 
 
 @app.get("/api/history/dates")
@@ -356,7 +380,7 @@ async def history_dates(_user: AuthUser = Depends(current_user)) -> dict:
     """Every Asia/Kolkata trading date with persisted data (newest first),
     plus today's IST date — backs the Date/Session selector's Previous/Next/
     date-picker navigation."""
-    return await engine_call("get_available_trading_dates")
+    return await cached_engine_call(DATES_TTL_SECONDS, "get_available_trading_dates")
 
 
 @app.get("/api/history/session")
@@ -372,11 +396,12 @@ async def history_session(date: str, strike: float | None = None, user: AuthUser
         datetime.strptime(date, "%Y-%m-%d")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="date must be in YYYY-MM-DD format.") from exc
-    data = await engine_call("get_historical_session", date, strike)
+    data = await cached_engine_call(_session_ttl(date), "get_historical_session", date, strike)
     if auth_settings.auth_required():
-        # The engine's own paper section is global; replace it with this user's trades.
+        # The engine's own paper section is global; replace it with this user's trades. `data` is
+        # shared through the cache, so change a copy, never the original.
         trades = await asyncio.to_thread(get_paper_service().trades_for_date, user.id, date)
-        data["paper_trading"] = summarize_persisted_paper_trades(trades)
+        data = {**data, "paper_trading": summarize_persisted_paper_trades(trades)}
     return data
 
 
@@ -389,11 +414,11 @@ async def straddle_candles(strike: float, date: str | None = None, _user: AuthUs
     trading session (read-only, no live ticks). 404 if that strike has no
     data yet/for that date."""
     if date is not None:
-        data = await engine_call("get_persisted_strike_candles_for_date", strike, date)
+        data = await cached_engine_call(_session_ttl(date), "get_persisted_strike_candles_for_date", strike, date)
         if data is None:
             raise HTTPException(status_code=404, detail=f"No candle data for strike {strike} on {date}")
         return data
-    data = await engine_call("get_strike_straddle_candles", strike)
+    data = await cached_engine_call(LIVE_TTL_SECONDS, "get_strike_straddle_candles", strike)
     if data is None:
         raise HTTPException(status_code=404, detail=f"No candle data yet for strike {strike}")
     return data

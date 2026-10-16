@@ -171,3 +171,15 @@ table.data { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
 .switch { text-align: center; font-size: 0.9rem; }
 
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; } }
+
+/* -- selection, straddle, history -------------------------------------------------- */
+.data td.chk { width: 1%; padding-left: 6px; padding-right: 2px; }
+.data td.clickable { cursor: pointer; }
+.data td.clickable:hover { background: var(--line); }
+.data td.picked { box-shadow: inset 0 0 0 2px var(--accent); border-radius: 4px; }
+input.narrow { width: 84px; min-height: 32px; padding: 4px 8px; text-align: right; }
+label.inline { display: flex; align-items: center; gap: 6px; }
+.straddle-now { font-size: 1.3rem; margin-bottom: 6px; font-variant-numeric: tabular-nums; }
+.datebar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
+.datebar input[type="date"] { width: auto; }
+.datelabel { margin-left: 4px; }

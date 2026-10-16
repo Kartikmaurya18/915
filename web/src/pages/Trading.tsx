@@ -1,9 +1,14 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../api/http";
-import type { OpenPositionBody, PaperConfig, PaperPosition, PaperState } from "../api/types";
+import type { OpenPositionBody, OptionsTopic, PaperConfig, PaperPosition, PaperState } from "../api/types";
+import { useConfig } from "../api/useConfig";
 import { usePaperState } from "../api/usePaperState";
 import { fmt, fmtDateTime, fmtInt, fmtSigned, pnlClass } from "../lib/format";
+import { useTopic } from "../realtime/RealtimeProvider";
+import { executeEntries, summarise } from "../state/execute";
+import { sorted, type Selected } from "../state/selection";
+import { useSelection } from "../state/SelectionContext";
 
 export default function Trading() {
   const { state, error, refresh } = usePaperState();
@@ -12,6 +17,7 @@ export default function Trading() {
       <p className="notice-line">Simulated trading only. Prices come from the live feed; no real orders are placed.</p>
       {error && !state && <p className="form-error" role="alert">{error}</p>}
       <Summary state={state} />
+      <SelectedContracts onDone={refresh} />
       <div className="grid-2">
         <OrderForm onDone={refresh} />
         <ConfigForm config={state?.config} onDone={refresh} />
@@ -45,7 +51,156 @@ function Summary({ state }: { state: PaperState | null }) {
         <span className="metric-label">Max drawdown</span>
         <strong className="metric-value">{s ? fmt(s.max_drawdown) : "—"}</strong>
       </div>
+      <div className="metric">
+        <span className="metric-label">Open position value</span>
+        <strong className="metric-value">{p ? fmt(p.total_position_value) : "—"}</strong>
+      </div>
+      <div className="metric">
+        <span className="metric-label">Turnover</span>
+        <strong className="metric-value">{p ? fmt(p.total_turnover) : "—"}</strong>
+        <span className="metric-sub">{p ? "Buy " + fmt(p.buy_turnover) + " · Sell " + fmt(p.sell_turnover) : undefined}</span>
+      </div>
+      <div className="metric">
+        <span className="metric-label">Total P&amp;L %</span>
+        <strong className={"metric-value " + pnlClass(p?.total_pnl_percent)}>{p ? fmtSigned(p.total_pnl_percent) + "%" : "—"}</strong>
+      </div>
     </section>
+  );
+}
+
+function SelectedContracts({ onDone }: { onDone: () => Promise<void> }) {
+  const sel = useSelection();
+  const { config } = useConfig();
+  const options = useTopic<OptionsTopic>(config ? "options:" + config.underlying : null).data;
+  const [busy, setBusy] = useState<string | null>(null); // a contract key, or "all"
+  const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
+  const entries = sorted(sel.selection);
+
+  const openOne = (e: Selected) =>
+    api.post<PaperPosition>(
+      "/api/paper/open",
+      { option_type: e.optionType, strike: e.strike, side: e.side, quantity: e.quantity, expiry: e.expiry, underlying: e.underlying },
+      { "Idempotency-Key": e.nonce },
+    );
+
+  async function run(which: Selected[], token: string) {
+    if (busy || which.length === 0) return;
+    setBusy(token);
+    setMessage(null);
+    const result = await executeEntries(which, openOne);
+    sel.remove(result.succeeded.map((e) => e.key)); // failures stay selected so they can be fixed or retried
+    setMessage(summarise(result));
+    setBusy(null);
+    await onDone();
+  }
+
+  return (
+    <section className="panel">
+      <header className="panel-head">
+        <h2>Selected contracts</h2>
+        <div className="row tight">
+          <label className="inline">
+            Default qty
+            <input
+              className="narrow"
+              inputMode="numeric"
+              value={sel.defaultQuantity}
+              onChange={(e) => sel.setDefaultQuantity(Math.max(1, Math.floor(Number(e.target.value)) || 1))}
+            />
+          </label>
+          {entries.length > 0 && (
+            <button className="btn btn-small" onClick={sel.clear}>
+              Clear
+            </button>
+          )}
+          <button className="btn btn-primary btn-small" disabled={entries.length === 0 || busy !== null} onClick={() => void run(entries, "all")}>
+            {busy === "all" ? "Executing…" : entries.length ? "Execute " + entries.length + " selected" : "Execute selected"}
+          </button>
+        </div>
+      </header>
+      {entries.length === 0 ? (
+        <p className="empty">
+          No contracts selected. Tick CE / PE boxes in the <Link to="/">option chain</Link> to add them here: one for a single trade, several for a multi-strike trade.
+        </p>
+      ) : (
+        <div className="table-wrap">
+          <table className="data">
+            <thead>
+              <tr>
+                <th className="r">Strike</th>
+                <th>Type</th>
+                <th className="r">LTP</th>
+                <th className="r">Δ</th>
+                <th>Expiry</th>
+                <th>Side</th>
+                <th className="r">Qty</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map((e) => {
+                const row = options?.strikes.find((r) => r.strike === e.strike);
+                const ce = e.optionType === "CE";
+                return (
+                  <tr key={e.key}>
+                    <td className="r">{fmtInt(e.strike)}</td>
+                    <td className={ce ? "call" : "put"}>{e.optionType}</td>
+                    <td className="r">{fmt(ce ? row?.call_ltp : row?.put_ltp)}</td>
+                    <td className="r muted">{fmt(ce ? row?.call_delta : row?.put_delta, 3)}</td>
+                    <td>{e.expiry ?? "—"}</td>
+                    <td>
+                      <div className="seg" role="group" aria-label={"Side for " + e.strike + " " + e.optionType}>
+                        {(["BUY", "SELL"] as const).map((side) => (
+                          <button key={side} type="button" className={e.side === side ? "seg-btn on" : "seg-btn"} aria-pressed={e.side === side} onClick={() => sel.update(e.key, { side })}>
+                            {side}
+                          </button>
+                        ))}
+                      </div>
+                    </td>
+                    <td className="r">
+                      <QuantityInput value={e.quantity} onCommit={(q) => sel.update(e.key, { quantity: q })} label={"Quantity for " + e.strike + " " + e.optionType} />
+                    </td>
+                    <td className="actions">
+                      <button className="btn btn-small" disabled={busy !== null} onClick={() => void run([e], e.key)}>
+                        {busy === e.key ? "…" : "Execute"}
+                      </button>{" "}
+                      <button className="btn btn-small btn-quiet" onClick={() => sel.remove([e.key])}>
+                        Remove
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {message && (
+        <p className={message.ok ? "form-ok" : "form-error"} role={message.ok ? "status" : "alert"}>
+          {message.text}
+        </p>
+      )}
+    </section>
+  );
+}
+
+/** Lets the user clear the field while typing; only a valid whole number above zero is committed. */
+function QuantityInput({ value, onCommit, label }: { value: number; onCommit: (q: number) => void; label: string }) {
+  const [text, setText] = useState(String(value));
+  useEffect(() => setText(String(value)), [value]);
+  return (
+    <input
+      className="narrow"
+      inputMode="numeric"
+      aria-label={label}
+      value={text}
+      onChange={(e) => {
+        setText(e.target.value);
+        const q = Number(e.target.value);
+        if (Number.isInteger(q) && q > 0) onCommit(q);
+      }}
+      onBlur={() => setText(String(value))}
+    />
   );
 }
 

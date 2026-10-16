@@ -1,5 +1,8 @@
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
+import { StraddleChart } from "../components/StraddleChart";
+import { distinctStrikes, focusStrike, selectionKey } from "../state/selection";
+import { useSelection } from "../state/SelectionContext";
 import { useConfig } from "../api/useConfig";
 import type { CandlesTopic, IndexTopic, OptionsTopic } from "../api/types";
 import { CandleChart } from "../components/CandleChart";
@@ -45,10 +48,11 @@ export default function Overview() {
         <CandleChart series={candles.data?.series ?? []} resetKey={`${underlying}:${interval}`} />
       </section>
 
-      <div className="grid-2">
-        <OptionChain options={options.data} />
-        <RecentCandles candles={candles.data} interval={interval} />
-      </div>
+      <OptionChain options={options.data} atm={atm?.strike ?? null} />
+
+      <StraddleSection options={options.data} atm={atm?.strike ?? null} />
+
+      <RecentCandles candles={candles.data} interval={interval} />
     </>
   );
 }
@@ -63,49 +67,106 @@ function Metric({ label, value, sub }: { label: string; value: string; sub?: str
   );
 }
 
-function OptionChain({ options }: { options: OptionsTopic | undefined }) {
-  const rows = options?.strikes ?? [];
+const WINDOW = 6; // strikes shown either side of the at-the-money strike unless expanded
+
+function OptionChain({ options, atm }: { options: OptionsTopic | undefined; atm: number | null }) {
+  const sel = useSelection();
+  const [showAll, setShowAll] = useState(false);
+  const all = useMemo(() => [...(options?.strikes ?? [])].sort((a, b) => a.strike - b.strike), [options?.strikes]);
+  const rows = useMemo(() => {
+    if (showAll) return all;
+    const at = all.findIndex((r) => r.is_atm || r.strike === atm);
+    if (at < 0) return all;
+    return all.slice(Math.max(0, at - WINDOW), at + WINDOW + 1);
+  }, [all, atm, showAll]);
+
+  const pick = (strike: number, optionType: "CE" | "PE") =>
+    sel.toggle({ strike, optionType, expiry: options?.expiry ?? null, underlying: options?.underlying ?? null });
+  const count = sel.selection.size;
+
   return (
     <section className="panel">
       <header className="panel-head">
         <h2>Option chain</h2>
-        <span className="muted">{options ? `Expiry ${options.expiry}` : ""}</span>
+        <div className="row tight">
+          <span className="muted">{options ? `Expiry ${options.expiry}` : ""}</span>
+          {count > 0 && (
+            <>
+              <button className="btn btn-small" onClick={sel.clear}>Clear</button>
+              <Link className="btn btn-small btn-primary" to="/trading">Trade {count} selected →</Link>
+            </>
+          )}
+        </div>
       </header>
+      <p className="hint">Tick the CE / PE boxes (or click a price) to add contracts to your paper-trading selection. One is a single trade; several is a multi-strike trade.</p>
       <div className="table-wrap">
         <table className="data">
           <thead>
             <tr>
-              <th className="r">CE OI</th>
+              <th aria-label="Select CE" />
               <th className="r">CE LTP</th>
+              <th className="r">CE Δ</th>
               <th className="r">Strike</th>
+              <th className="r">PE Δ</th>
               <th className="r">PE LTP</th>
+              <th aria-label="Select PE" />
+              <th className="r">CE+PE</th>
+              <th className="r">CE OI</th>
               <th className="r">PE OI</th>
-              <th aria-label="Trade" />
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 && (
               <tr>
-                <td colSpan={6} className="empty">Waiting for the option chain…</td>
+                <td colSpan={10} className="empty">Waiting for the option chain…</td>
               </tr>
             )}
-            {rows.map((r) => (
-              <tr key={r.strike} className={r.is_atm ? "atm" : undefined}>
-                <td className="r">{fmtCompact(r.call_oi)}</td>
-                <td className="r call">{fmt(r.call_ltp)}</td>
-                <td className="r strike">{fmtInt(r.strike)}</td>
-                <td className="r put">{fmt(r.put_ltp)}</td>
-                <td className="r">{fmtCompact(r.put_oi)}</td>
-                <td className="actions">
-                  <Link className="chip call" to={`/trading?type=CE&strike=${r.strike}`} aria-label={`Trade ${r.strike} CE`}>CE</Link>
-                  <Link className="chip put" to={`/trading?type=PE&strike=${r.strike}`} aria-label={`Trade ${r.strike} PE`}>PE</Link>
-                </td>
-              </tr>
-            ))}
+            {rows.map((r) => {
+              const ce = sel.selection.has(selectionKey(r.strike, "CE"));
+              const pe = sel.selection.has(selectionKey(r.strike, "PE"));
+              return (
+                <tr key={r.strike} className={r.is_atm ? "atm" : undefined}>
+                  <td className="chk"><input type="checkbox" checked={ce} onChange={() => pick(r.strike, "CE")} aria-label={`Select ${r.strike} CE`} /></td>
+                  <td className={`r call clickable${ce ? " picked" : ""}`} onClick={() => pick(r.strike, "CE")}>{fmt(r.call_ltp)}</td>
+                  <td className="r muted">{fmt(r.call_delta, 3)}</td>
+                  <td className="r strike">{fmtInt(r.strike)}</td>
+                  <td className="r muted">{fmt(r.put_delta, 3)}</td>
+                  <td className={`r put clickable${pe ? " picked" : ""}`} onClick={() => pick(r.strike, "PE")}>{fmt(r.put_ltp)}</td>
+                  <td className="chk"><input type="checkbox" checked={pe} onChange={() => pick(r.strike, "PE")} aria-label={`Select ${r.strike} PE`} /></td>
+                  <td className="r">{fmt(r.combined_value)}</td>
+                  <td className="r muted">{fmtCompact(r.call_oi)}</td>
+                  <td className="r muted">{fmtCompact(r.put_oi)}</td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
+      {all.length > rows.length || showAll ? (
+        <button className="btn btn-small" onClick={() => setShowAll((v) => !v)}>
+          {showAll ? "Show fewer strikes" : `Show all ${all.length} strikes`}
+        </button>
+      ) : null}
     </section>
+  );
+}
+
+/** The straddle chart follows the selection: ATM by default, the one selected strike, or the user's pick. */
+function StraddleSection({ options, atm }: { options: OptionsTopic | undefined; atm: number | null }) {
+  const sel = useSelection();
+  const strike = focusStrike(sel.selection, atm, sel.pickedStrike);
+  const strikes = distinctStrikes(sel.selection);
+  const row = strike === null ? null : (options?.strikes.find((r) => r.strike === strike) ?? null);
+  const chip = strikes.length === 0 ? "Following ATM" : strikes.length === 1 ? "Tracking selected strike" : undefined;
+  return (
+    <StraddleChart
+      strike={strike}
+      liveRow={row}
+      expiry={options?.expiry ?? null}
+      chip={chip}
+      options={strikes.length > 1 ? strikes : undefined}
+      onPick={sel.setPickedStrike}
+    />
   );
 }
 

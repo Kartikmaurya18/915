@@ -179,7 +179,10 @@ export interface PaperState {
     realized_pnl: number;
     total_pnl: number;
     total_pnl_percent: number;
+    buy_turnover: number;
+    sell_turnover: number;
     total_turnover: number;
+    total_position_value: number;
     open_position_count: number;
   };
 }
@@ -209,4 +212,52 @@ export interface SettingsPayload {
   candle_price_basis: string;
   expiry: string | null;
   replay: { available_sequences: string[]; sequence: string | null; speed: number | null };
+}
+
+// -- straddle chart and history ----------------------------------------------------------
+
+export interface Bar {
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+}
+
+export type StraddleView = "straddle" | "ce" | "pe";
+
+/** `GET /api/straddle-candles` — all intervals and legs for one strike, so tab switches need no request. */
+export interface StraddleCandles {
+  strike: number;
+  by_interval: Record<string, Partial<Record<StraddleView, Bar[]>>>;
+}
+
+export interface TradingDates {
+  dates: string[];
+  today: string;
+}
+
+export interface AtmSnapshotRow {
+  timestamp: string;
+  expiry: string | null;
+  atm_strike: number;
+  atm_call_ltp: number | null;
+  atm_put_ltp: number | null;
+  straddle_premium: number | null;
+}
+
+/** `GET /api/history/session?date=…` */
+export interface HistoricalSession {
+  trading_date: string;
+  has_data: boolean;
+  underlying: { symbol: string; open: number | null; high: number | null; low: number | null; close: number | null; last_updated: string | null };
+  candles: Record<string, Candle[]>;
+  option_chain_snapshots: AtmSnapshotRow[];
+  available_strikes: number[];
+  straddle_candles: StraddleCandles | null;
+  paper_trading: {
+    history: PaperPosition[];
+    stats: PaperState["stats"];
+    pnl_summary: PaperState["pnl_summary"];
+  };
 }
