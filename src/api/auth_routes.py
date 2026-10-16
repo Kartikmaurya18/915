@@ -9,22 +9,30 @@ form posts (CSRF). All routes 404 when AUTH_MODE=disabled.
 
 from __future__ import annotations
 
+import hashlib
+
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from src.auth import service, settings
 from src.auth.deps import AuthUser, client_ip, current_user
-from src.auth.ratelimit import SlidingWindowLimiter
+from src.auth.ratelimit import make_limiter
 from src.db.models import User
 from src.db.session import run_in_transaction, session_scope
 
 REFRESH_COOKIE = "refresh_token"
 COOKIE_PATH = "/api/auth"
 
-login_by_ip = SlidingWindowLimiter(max_events=20, window_seconds=300)
-login_by_account = SlidingWindowLimiter(max_events=5, window_seconds=300)
-register_by_ip = SlidingWindowLimiter(max_events=10, window_seconds=3600)
+# Shared through Redis when REDIS_URL is set, so the limits hold across gateway replicas (see ratelimit.py).
+login_by_ip = make_limiter("login_ip", max_events=20, window_seconds=300)
+login_by_account = make_limiter("login_account", max_events=5, window_seconds=300)
+register_by_ip = make_limiter("register_ip", max_events=10, window_seconds=3600)
+
+
+def _account_key(email: str) -> str:
+    """A stable tag for an email that is not the address itself (limiter keys can be stored in Redis)."""
+    return hashlib.sha256(email.strip().lower().encode("utf-8")).hexdigest()[:32]
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -39,7 +47,7 @@ def _require_csrf_header(request: Request) -> None:
         raise HTTPException(status_code=403, detail={"code": "csrf", "message": "Missing X-Requested-With header."})
 
 
-def _too_many(limiter: SlidingWindowLimiter) -> HTTPException:
+def _too_many(limiter) -> HTTPException:
     return HTTPException(
         status_code=429,
         detail={"code": "rate_limited", "message": "Too many attempts. Try again later."},
@@ -92,7 +100,7 @@ def register(body: Credentials, request: Request, response: Response) -> dict:
 def login(body: Credentials, request: Request, response: Response) -> dict:
     _require_enabled()
     ip = client_ip(request)
-    account = body.email.strip().lower()
+    account = _account_key(body.email)
     if login_by_ip.is_blocked(ip) or login_by_account.is_blocked(account):
         raise _too_many(login_by_account)
     try:

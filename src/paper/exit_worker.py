@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from typing import Callable
 
 from sqlalchemy import select
 
@@ -27,8 +28,11 @@ log = logging.getLogger("market_data.paper")
 
 
 class PaperExitWorker:
-    def __init__(self) -> None:
+    def __init__(self, on_exits: Callable[[set[str]], None] | None = None) -> None:
         self.exits = 0  # for tests and metrics
+        # Called with the ids of users whose positions were closed, AFTER the transaction committed,
+        # so a notified client that refetches immediately always sees the closed position.
+        self._on_exits = on_exits
 
     def on_chain(self, chain, timestamp: datetime) -> int:
         """Apply exits for one tick. Returns how many positions were closed."""
@@ -36,6 +40,7 @@ class PaperExitWorker:
             return 0
         legs = {leg.strike: leg for leg in chain.strikes}
         closed = 0
+        affected: set[str] = set()
         with session_scope() as session:
             rows = session.scalars(select(PaperPositionRow).where(PaperPositionRow.status == "OPEN")).all()
             for row in rows:
@@ -60,7 +65,13 @@ class PaperExitWorker:
                         {"id": position.id, "reason": reason, "pnl": round(position.pnl, 2)},
                     )
                     closed += 1
+                    affected.add(row.user_id)
         self.exits += closed
+        if affected and self._on_exits is not None:
+            try:
+                self._on_exits(affected)
+            except Exception:
+                log.exception("paper exit notification failed")  # notices are best effort; polling still catches up
         return closed
 
     def __call__(self, chain, timestamp: datetime) -> None:  # engine chain-listener signature

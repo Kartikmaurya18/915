@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     DateTime,
     Float,
@@ -182,7 +183,83 @@ class AuditLog(Base):
     )
 
 
+# -- market history (global, written by the engine's leader, read by everyone) -----------------
+# Times are stored as ISO-8601 text with the +05:30 offset, exactly as the original SQLite store
+# kept them, so ordering and every reader behave identically on both backends.
+
+
+class MarketCandle(Base):
+    """A completed candle for the underlying or one strike leg ("24800.0_ce" / "_pe" / "_straddle")."""
+
+    __tablename__ = "market_candles"
+
+    symbol: Mapped[str] = mapped_column(String(48), primary_key=True)
+    interval_minutes: Mapped[int] = mapped_column(Integer, primary_key=True)
+    open_time: Mapped[str] = mapped_column(String(40), primary_key=True)
+    close_time: Mapped[str] = mapped_column(String(40), nullable=False)
+    open: Mapped[float] = mapped_column(Float, nullable=False)
+    high: Mapped[float] = mapped_column(Float, nullable=False)
+    low: Mapped[float] = mapped_column(Float, nullable=False)
+    close: Mapped[float] = mapped_column(Float, nullable=False)
+    tick_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    trading_date: Mapped[str] = mapped_column(String(10), nullable=False)
+
+    __table_args__ = (
+        Index("ix_market_candles_date", "symbol", "interval_minutes", "trading_date"),
+        Index("ix_market_candles_trading_date", "trading_date"),
+    )
+
+
+class MarketChainSnapshot(Base):
+    """A periodic ATM-focused option-chain snapshot."""
+
+    __tablename__ = "market_chain_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer().with_variant(BigInteger, "postgresql"), primary_key=True, autoincrement=True)
+    underlying: Mapped[str] = mapped_column(String(32), nullable=False)
+    underlying_ltp: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    expiry: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    atm_strike: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    atm_call_ltp: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    atm_put_ltp: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    straddle_premium: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    timestamp: Mapped[str] = mapped_column(String(40), nullable=False)
+    trading_date: Mapped[str] = mapped_column(String(10), nullable=False)
+
+    __table_args__ = (Index("ix_market_chain_lookup", "underlying", "trading_date", "timestamp"),)
+
+
+class LegacyPaperTrade(Base):
+    """Closed trades of the single global paper book (AUTH_MODE=disabled). Signed-in users' trades
+    live in paper_positions; this exists so local development keeps its history on the same backend."""
+
+    __tablename__ = "legacy_paper_trades"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    option_type: Mapped[str] = mapped_column(String(2), nullable=False)
+    side: Mapped[str] = mapped_column(String(4), nullable=False)
+    strike: Mapped[float] = mapped_column(Float, nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    entry_price: Mapped[float] = mapped_column(Float, nullable=False)
+    entry_time: Mapped[str] = mapped_column(String(40), nullable=False)
+    exit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    exit_time: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    exit_reason: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    pnl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    pnl_percent: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    take_profit_percent: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    stop_loss_percent: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    take_profit_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    stop_loss_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    trading_date: Mapped[str] = mapped_column(String(10), nullable=False)
+
+    __table_args__ = (Index("ix_legacy_paper_trades_date", "trading_date"),)
+
+
 __all__ = [
+    "LegacyPaperTrade",
+    "MarketCandle",
+    "MarketChainSnapshot",
     "AuditLog",
     "Base",
     "IdempotencyKey",

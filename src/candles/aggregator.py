@@ -135,6 +135,23 @@ class CandleAggregator:
         )
         return candle
 
+    def restore(
+        self,
+        completed: dict[int, list[Candle]] | None = None,
+        active: dict[int, Candle] | None = None,
+    ) -> None:
+        """Warm start after a restart or a leader change.
+
+        Only fills what is still empty, so calling it on an engine that has already been ticking can
+        never overwrite or duplicate live state. An in-progress candle that has since been overtaken
+        by a newer interval is finalised by the next tick, exactly as it would have been originally."""
+        for interval, candles in (completed or {}).items():
+            if interval in self._completed and not self._completed[interval]:
+                self._completed[interval] = sorted(candles, key=lambda c: c.open_time)
+        for interval, candle in (active or {}).items():
+            if interval in self.intervals and interval not in self._active:
+                self._active[interval] = candle
+
     def snapshot_active(self) -> dict[int, Candle]:
         """Return a shallow copy of in-progress candles for display."""
         return dict(self._active)

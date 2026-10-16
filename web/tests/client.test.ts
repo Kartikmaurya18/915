@@ -259,3 +259,27 @@ describe("reconnection", () => {
     expect(client.getInfo().status).toBe("idle");
   });
 });
+
+describe("paper change notices", () => {
+  it("tells listeners when the server says the paper book changed", () => {
+    const { client } = make();
+    const ws = connect(client);
+    const listener = vi.fn();
+    const off = client.onPaperChanged(listener);
+    ws.receive({ type: "paper_changed" });
+    ws.receive({ type: "paper_changed" });
+    expect(listener).toHaveBeenCalledTimes(2);
+    off();
+    ws.receive({ type: "paper_changed" });
+    expect(listener).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not treat a notice as market data", () => {
+    const { client } = make();
+    const ws = connect(client);
+    client.subscribe("index:NIFTY", () => undefined);
+    ws.receive({ type: "paper_changed" });
+    expect(client.getTopic("index:NIFTY")).toBeUndefined();
+    expect(client.getInfo().resyncs).toBe(0);
+  });
+});

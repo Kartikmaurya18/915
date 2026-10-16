@@ -89,6 +89,17 @@ def redis_url() -> str:
     return os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 
+def user_channel_prefix(prefix: str | None = None) -> str:
+    return f"{prefix if prefix is not None else default_prefix()}user:"
+
+
+def publish_user_event(client: redis.Redis, user_id: str, prefix: str | None = None) -> None:
+    """Announce that one user's paper book changed. Every gateway receives it and tells that user's
+    open sockets. Carries no data (the browser refetches over authenticated REST), so nothing private
+    travels through Redis pub/sub and a lost message is harmless: the next poll heals it."""
+    client.publish(user_channel_prefix(prefix) + user_id, "paper")
+
+
 def encode(update: TopicUpdate) -> str:
     return json.dumps(
         {"t": update.topic, "e": update.epoch, "s": update.seq, "ts": update.ts, "pub": update.pub, "d": update.payload},
@@ -286,6 +297,7 @@ class RedisSubscriber:
 
     async def _run(self) -> None:
         backoff = 0.25
+        user_prefix = user_channel_prefix(self.prefix)
         while not self._stop.is_set():
             client = pubsub = None
             try:
@@ -293,14 +305,19 @@ class RedisSubscriber:
                     self.url, decode_responses=True, health_check_interval=10, socket_keepalive=True, client_name=self.client_name
                 )
                 pubsub = client.pubsub(ignore_subscribe_messages=True)
-                await pubsub.psubscribe(f"{self.prefix}ch:*")  # subscribe FIRST, so reading snapshots cannot leave a gap
+                # subscribe FIRST, so reading snapshots cannot leave a gap
+                await pubsub.psubscribe(f"{self.prefix}ch:*", f"{self.prefix}user:*")
                 await self._load_snapshots(client)
                 self._set_connected(True)
                 backoff, last_reconcile = 0.25, time.monotonic()
                 while not self._stop.is_set():
                     message = await pubsub.get_message(timeout=1.0)
                     if message and message.get("type") == "pmessage":
-                        self._apply(message["data"])
+                        channel = message.get("channel") or ""
+                        if channel.startswith(user_prefix):
+                            self.hub.notify_user(channel[len(user_prefix):])
+                        else:
+                            self._apply(message["data"])
                     if time.monotonic() - last_reconcile >= self.reconcile_seconds:
                         await self._load_snapshots(client)  # heals anything pub/sub dropped
                         last_reconcile = time.monotonic()

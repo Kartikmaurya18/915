@@ -36,7 +36,7 @@ from src.realtime import settings as rt_settings
 from src.realtime.control import ControlClient, ControlRemoteError, ControlUnavailable
 from src.realtime.hub import Hub, TopicUpdate, validate_topics
 from src.realtime.publisher import TopicPublisher
-from src.realtime.redis_bus import RedisSubscriber
+from src.realtime.redis_bus import RedisSubscriber, publish_user_event
 from src.realtime.topics import merge_topics
 from src.serializers import summarize_persisted_paper_trades
 from src.timeutil import today_ist
@@ -91,12 +91,53 @@ def get_paper_service() -> PaperService:
     return _paper_service
 
 
+_event_redis = None
+
+
+def _notify_local(user_id: str) -> None:
+    """Notify this process's own sockets of `user_id`. Safe from any thread (the hub lives on the loop)."""
+    loop = _loop
+    if loop is None or getattr(loop, "is_closed", lambda: True)():
+        return
+    try:
+        loop.call_soon_threadsafe(rt_hub.notify_user, user_id)
+    except RuntimeError:
+        pass  # loop shutting down
+
+
+def notify_paper_changed(user_id: str) -> None:
+    """Tell every open socket of one user, on any gateway, that their paper book changed.
+
+    Gateway mode goes through Redis so a user's other tabs on other gateways hear it too (this process
+    receives its own message back, so it is not also notified directly). If Redis cannot be reached,
+    or there is no Redis, this process's sockets are notified directly."""
+    global _event_redis
+    if rt_settings.is_gateway():
+        try:
+            if _event_redis is None:
+                import redis as _redis
+
+                from src.realtime.redis_bus import redis_url
+
+                _event_redis = _redis.Redis.from_url(redis_url(), socket_timeout=0.5, socket_connect_timeout=0.5)
+            publish_user_event(_event_redis, user_id)
+            return
+        except Exception:
+            pass
+    _notify_local(user_id)
+
+
+def _notify_many_local(user_ids: set[str]) -> None:
+    for user_id in user_ids:
+        _notify_local(user_id)
+
+
 def ensure_exit_worker() -> None:
     """Register the TP/SL exit worker with the engine. Only the process that owns the engine
     (embedded mode, or the ingestor) does this; a gateway never decides exits."""
     global _exit_worker
     if _exit_worker is None:
-        _exit_worker = PaperExitWorker()
+        _exit_worker = PaperExitWorker(on_exits=_notify_many_local)
         engine.add_chain_listener(_exit_worker)
 
 
@@ -489,19 +530,22 @@ def paper_open(
             position = engine.open_paper_position(
                 req.option_type, req.strike, req.quantity, req.side, expiry=req.expiry, underlying=req.underlying
             )
-            return position.to_dict()
-        return get_paper_service().open_position(
-            user.id,
-            req.option_type,
-            req.strike,
-            req.quantity,
-            req.side,
-            expiry=req.expiry,
-            underlying=req.underlying,
-            idempotency_key=idempotency_key,
-        )
+            result = position.to_dict()
+        else:
+            result = get_paper_service().open_position(
+                user.id,
+                req.option_type,
+                req.strike,
+                req.quantity,
+                req.side,
+                expiry=req.expiry,
+                underlying=req.underlying,
+                idempotency_key=idempotency_key,
+            )
     except (ValueError, PaperError) as exc:
         raise _bad_request(exc) from exc
+    notify_paper_changed(user.id)  # the user's other tabs refetch at once
+    return result
 
 
 @app.post("/api/paper/close/{position_id}")
@@ -514,6 +558,7 @@ def paper_close(position_id: str, user: AuthUser = Depends(current_user)) -> dic
         result = get_paper_service().close_position(user.id, position_id)
     if result is None:
         raise HTTPException(status_code=404, detail="Position not found or already closed.")
+    notify_paper_changed(user.id)
     return result
 
 
@@ -522,14 +567,17 @@ def paper_config(req: PaperConfigRequest, user: AuthUser = Depends(current_user)
     """Update the simulated Take Profit / Stop Loss thresholds."""
     try:
         if not auth_settings.auth_required():
-            return engine.set_paper_config(
+            result = engine.set_paper_config(
                 req.take_profit_percent, req.stop_loss_percent, req.take_profit_amount, req.stop_loss_amount
             ).as_dict()
-        return get_paper_service().set_config(
-            user.id, req.take_profit_percent, req.stop_loss_percent, req.take_profit_amount, req.stop_loss_amount
-        )
+        else:
+            result = get_paper_service().set_config(
+                user.id, req.take_profit_percent, req.stop_loss_percent, req.take_profit_amount, req.stop_loss_amount
+            )
     except (ValueError, PaperError) as exc:
         raise _bad_request(exc) from exc
+    notify_paper_changed(user.id)
+    return result
 
 
 # -- Operator surface (global; admin only when AUTH_MODE=required) ----------------

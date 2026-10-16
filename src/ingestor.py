@@ -34,7 +34,8 @@ from src.paper.exit_worker import PaperExitWorker
 from src.realtime import metrics
 from src.realtime.control import ControlServer
 from src.realtime.publisher import TopicPublisher
-from src.realtime.redis_bus import LeaderElector, RedisSink, default_prefix, redis_url
+from src.realtime.redis_bus import LeaderElector, RedisSink, decode, default_prefix, publish_user_event, redis_url
+from src.realtime.topics import candles_topic
 
 log = logging.getLogger("market_data.ingestor")
 
@@ -57,10 +58,18 @@ class Ingestor:
         self.elector = LeaderElector(self.client, self.node_id, self.prefix, self.ttl_ms)
         self.publisher = TopicPublisher(RedisSink(self.client, self.elector, self.prefix), self.engine.underlying, epoch=0)
         self.control = ControlServer(self.engine, self.elector, self.url, self.prefix)
-        self.exit_worker = PaperExitWorker() if auth_settings.auth_required() else None
+        self.exit_worker = PaperExitWorker(on_exits=self._publish_paper_events) if auth_settings.auth_required() else None
         self._stop = threading.Event()
         self._wake = threading.Event()
         self.became_leader = threading.Event()  # tests / diagnostics
+
+    def _publish_paper_events(self, user_ids: set[str]) -> None:
+        """After automatic exits: let each affected user's open sockets (on any gateway) refetch."""
+        for user_id in user_ids:
+            try:
+                publish_user_event(self.client, user_id, self.prefix)
+            except redis.RedisError as exc:
+                log.warning("could not announce a paper change for one user: %s", type(exc).__name__)
 
     # -- engine callback (runs on the engine's tick thread) --------------------
 
@@ -75,8 +84,24 @@ class Ingestor:
 
     # -- leadership transitions ------------------------------------------------
 
+    def _previous_active_candles(self) -> dict[int, dict]:
+        """The in-progress candles the previous leader last published (still in Redis), so a failover
+        continues the current candle instead of restarting it. Empty on a cold start."""
+        found: dict[int, dict] = {}
+        for interval in self.engine.intervals:
+            try:
+                raw = self.client.get(f"{self.prefix}snap:{candles_topic(self.engine.underlying, interval)}")
+                payload = decode(raw).payload if raw else None
+            except (redis.RedisError, ValueError, KeyError, TypeError):
+                continue
+            if isinstance(payload, dict) and isinstance(payload.get("active"), dict):
+                found[interval] = payload["active"]
+        return found
+
     def _become_leader(self, fence: int) -> None:
         log.info("node %s is now leader (epoch %s)", self.node_id, fence)
+        restored = self.engine.restore_candle_state(self._previous_active_candles())
+        log.info("candle state restored: %s", restored)
         self.publisher.new_epoch(fence)
         self.engine.unsubscribe(self._on_snapshot)
         self.engine.subscribe(self._on_snapshot)

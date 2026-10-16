@@ -347,3 +347,45 @@ suite("straddle chart and history against the live API", () => {
     expect((err as ApiError).status).toBe(400);
   });
 });
+
+suite("paper-change notices against the live server", () => {
+  it("tells the owner's open socket (and only theirs) when their book changes", async () => {
+    await signIn(users.a);
+    const a = newClient();
+    a.subscribe("index:NIFTY", () => undefined);
+    let notices = 0;
+    a.onPaperChanged(() => notices++);
+    a.start();
+    await until(() => a.getTopic("index:NIFTY"));
+    const tokenA = getAccessToken();
+
+    await signIn(users.b);
+    const b = newClient();
+    b.subscribe("index:NIFTY", () => undefined);
+    let bNotices = 0;
+    b.onPaperChanged(() => bNotices++);
+    b.start();
+    await until(() => b.getTopic("index:NIFTY"));
+
+    setAccessToken(tokenA); // act as user A over REST
+    const open = async () => {
+      const deadline = Date.now() + 20_000;
+      for (;;) {
+        try {
+          return await request<PaperPosition>("/api/paper/open", { method: "POST", body: { option_type: "CE", side: "BUY", quantity: 10, strike: null } });
+        } catch (err) {
+          if (!(err instanceof ApiError) || err.status !== 400 || Date.now() > deadline) throw err;
+          await new Promise((r) => setTimeout(r, 500));
+        }
+      }
+    };
+    const position = await open();
+    await until(() => notices >= 1, 5000); // pushed within moments, no polling involved
+    const afterOpen = notices;
+    await request("/api/paper/close/" + position.id, { method: "POST", body: {} });
+    await until(() => notices > afterOpen, 5000);
+    expect(bNotices).toBe(0); // user B heard nothing about A's trades
+    a.stop();
+    b.stop();
+  });
+});

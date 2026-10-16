@@ -76,6 +76,7 @@ export class RealtimeClient {
   private resyncPending = new Set<string>();
   private topicListeners = new Map<string, Set<Listener>>();
   private infoListeners = new Set<Listener>();
+  private paperListeners = new Set<Listener>();
   private backoff = INITIAL_BACKOFF_MS;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private watchdog: ReturnType<typeof setInterval> | null = null;
@@ -161,6 +162,15 @@ export class RealtimeClient {
 
   getInfo(): ConnectionInfo {
     return this.info;
+  }
+
+  /**
+   * The server says this user's paper book changed (an order, a close, a take-profit or stop-loss exit,
+   * or a settings change, possibly from another tab). The notice carries no data: refetch over REST.
+   */
+  onPaperChanged(listener: Listener): () => void {
+    this.paperListeners.add(listener);
+    return () => this.paperListeners.delete(listener);
   }
 
   onInfo(listener: Listener): () => void {
@@ -305,6 +315,10 @@ export class RealtimeClient {
         return;
       case "heartbeat":
         this.setInfo({ feedAgeMs: (msg as { feed_age_ms: number | null }).feed_age_ms });
+        return;
+      case "paper_changed":
+        for (const l of [...this.paperListeners]) l();
+        this.emitInfo();
         return;
       default:
         this.emitInfo();

@@ -16,6 +16,7 @@ messages_sent = Counter("rt_messages_sent_total", "Frames sent to clients", ["ty
 bytes_sent = Counter("rt_bytes_sent_total", "Payload bytes sent to clients", ["type"])
 snapshots_sent = Counter("rt_snapshots_sent_total", "Full snapshots sent", ["reason"])
 coalesced = Counter("rt_coalesced_total", "Intermediate topic versions skipped for clients that were behind")
+paper_notices = Counter("rt_paper_notices_total", "paper_changed notices sent to clients")
 clients_dropped = Counter("rt_clients_dropped_total", "Clients disconnected by the server", ["reason"])
 inbound_rejected = Counter("rt_inbound_rejected_total", "Client frames rejected", ["reason"])
 

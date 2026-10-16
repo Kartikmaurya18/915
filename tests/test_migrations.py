@@ -17,6 +17,7 @@ from tests.conftest import external_test_database_url
 
 EXPECTED_TABLES = {
     "users", "refresh_tokens", "paper_settings", "paper_positions", "idempotency_keys", "audit_log",
+    "market_candles", "market_chain_snapshots", "legacy_paper_trades",
 }
 
 

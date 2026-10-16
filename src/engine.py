@@ -28,6 +28,7 @@ from src.option_chain.greeks import build_greeks_engine
 from src.paper_trading import PaperPosition, PaperTradeConfig, PaperTradingEngine
 from src.risk import EXIT_MANUAL
 from src.persistence import PersistenceStore, ensure_seeded
+from src.auth import settings as auth_settings
 from src.price_calculator import get_calculator
 from src.serializers import (
     _empty_paper_stats,
@@ -47,6 +48,36 @@ def build_data_source(cfg: dict):
 
 
 UpdateCallback = Callable[[dict], None]
+
+
+def _history_backend(persistence_cfg: dict) -> str:
+    """Where market history is stored: "sql" (the shared database) or "sqlite" (a local file).
+
+    MARKET_HISTORY_BACKEND wins, then `persistence.backend` in config.yaml. By default a signed-in
+    deployment with a DATABASE_URL uses the shared database; local development keeps its file."""
+    explicit = (os.getenv("MARKET_HISTORY_BACKEND") or str(persistence_cfg.get("backend") or "")).strip().lower()
+    if explicit in ("sql", "sqlite"):
+        return explicit
+    return "sql" if auth_settings.auth_required() and os.getenv("DATABASE_URL") else "sqlite"
+
+
+def _candle_from_row(row: dict, complete: bool) -> Candle | None:
+    """A Candle from a stored row or a published candle dict; None if the row is unusable."""
+    try:
+        return Candle(
+            symbol=str(row["symbol"]),
+            interval_minutes=int(row["interval_minutes"]),
+            open_time=datetime.fromisoformat(row["open_time"]),
+            close_time=datetime.fromisoformat(row["close_time"]),
+            open=float(row["open"]),
+            high=float(row["high"]),
+            low=float(row["low"]),
+            close=float(row["close"]),
+            tick_count=int(row.get("tick_count", 0)),
+            is_complete=complete,
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 class MarketEngine:
@@ -154,7 +185,18 @@ class MarketEngine:
             persistence_cfg.get("option_chain_snapshot_interval_seconds", 5)
         )
         self._last_chain_persist_at: datetime | None = None
-        if persistence_cfg.get("enabled", False):
+        self._candle_state_restored = False
+        if persistence_cfg.get("enabled", False) and _history_backend(persistence_cfg) == "sql":
+            # Shared database (PostgreSQL in production): survives redeploys and is visible to a
+            # standby ingestor, unlike a file on this machine. No silent fallback to a local file:
+            # that would split the history in two. A failure is logged and history stays off.
+            try:
+                from src.db.history import SqlPersistenceStore
+
+                self._persistence = SqlPersistenceStore()
+            except Exception as e:
+                self._logger.log_error(e, {"context": "persistence_init_sql"})
+        elif persistence_cfg.get("enabled", False):
             db_path = persistence_cfg.get("db_path", "data/market_data.db")
             # Restore a committed seed of historical MOCK data if db_path
             # doesn't exist yet (e.g. a fresh Railway container with no
@@ -208,9 +250,47 @@ class MarketEngine:
         if callback in self._subscribers:
             self._subscribers.remove(callback)
 
+    def restore_candle_state(self, active: dict[int, dict] | None = None) -> dict[str, int]:
+        """Warm start so a restart or a failover does not blank the chart.
+
+        * Completed candles for today's trading date come from the history store.
+        * `active` (interval -> candle dict, as published in the `candles:` topic by the previous
+          leader) continues that in-progress candle instead of starting it again from the first tick.
+
+        Runs at most once per engine and never touches state that has already been built by ticks."""
+        restored = {"completed": 0, "active": 0}
+        with self._lock:
+            if self._candle_state_restored:
+                return restored
+            self._candle_state_restored = True
+            completed: dict[int, list[Candle]] = {}
+            if self._persistence is not None:
+                day = today_ist().isoformat()
+                for interval in self.intervals:
+                    try:
+                        rows = self._persistence.get_candles_for_date(self.underlying, interval, day)
+                    except Exception as e:
+                        self._logger.log_error(e, {"context": "candle_restore_read"})
+                        continue
+                    candles = [c for c in (_candle_from_row(r, complete=True) for r in rows) if c is not None]
+                    if candles:
+                        completed[interval] = candles
+                        restored["completed"] += len(candles)
+            seen = {(m, c.open_time) for m, cs in completed.items() for c in cs}
+            carried: dict[int, Candle] = {}
+            for interval, payload in (active or {}).items():
+                candle = _candle_from_row(payload, complete=False) if isinstance(payload, dict) else None
+                if candle is not None and (int(interval), candle.open_time) not in seen:
+                    carried[int(interval)] = candle
+                    restored["active"] += 1
+            self._aggregator.restore(completed=completed, active=carried)
+        return restored
+
     def start(self) -> None:
         if self.is_running:
             return
+        if not self._candle_state_restored:
+            self.restore_candle_state()
         self._stop_event.clear()
         self._worker_error = None
         self._worker = threading.Thread(target=self._tick_worker, daemon=True)

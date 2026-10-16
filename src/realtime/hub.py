@@ -35,6 +35,9 @@ HEARTBEAT_SECONDS = _env_float("RT_HEARTBEAT_SECONDS", 15)
 SEND_TIMEOUT_SECONDS = _env_float("RT_SEND_TIMEOUT_SECONDS", 5)
 MAX_TOPICS_PER_CLIENT = int(os.getenv("RT_MAX_TOPICS_PER_CLIENT", "16"))
 CONTROL_QUEUE_MAX = int(os.getenv("RT_CONTROL_QUEUE_MAX", "64"))
+# Sockets of a server running without auth have no user id; they all belong to this one implicit user.
+LOCAL_USER_KEY = "local-dev"
+PAPER_CHANGED_FRAME = protocol.control_message("paper_changed")
 
 
 @dataclass
@@ -94,6 +97,7 @@ class ClientSession:
         self._dirty: dict[str, None] = {}
         self._force_full: set[str] = set()
         self._control: deque[str] = deque()
+        self._paper_pending = False  # at most one "your paper book changed" notice is ever queued
         self._event = asyncio.Event()
         self.closed = False
         self.close_reason: str | None = None
@@ -139,6 +143,15 @@ class ClientSession:
             metrics.coalesced.inc()
         else:
             self._dirty[topic] = None
+        self._event.set()
+
+    def notify_paper(self) -> None:
+        """Tell this client its own paper book changed so it can refetch. Notices coalesce: any number
+        of changes before the next send produce one frame, so a busy account cannot flood the socket
+        or overflow the control queue."""
+        if self.closed or self._paper_pending:
+            return
+        self._paper_pending = True
         self._event.set()
 
     def queue_control(self, frame: str) -> None:
@@ -251,6 +264,11 @@ class ClientSession:
                 while self._control and not self.closed:
                     if not await self._send(self._control.popleft(), "control"):
                         return
+                if self._paper_pending and not self.closed:
+                    self._paper_pending = False  # cleared first: a change during the send queues the next notice
+                    metrics.paper_notices.inc()
+                    if not await self._send(PAPER_CHANGED_FRAME, "control"):
+                        return
                 while self._dirty and not self.closed:
                     topic = next(iter(self._dirty))
                     del self._dirty[topic]
@@ -275,6 +293,7 @@ class Hub:
         self._subscribers: dict[str, set[ClientSession]] = {}
         self.clients: set[ClientSession] = set()
         self._per_user: Counter = Counter()
+        self._by_user: dict[str, set[ClientSession]] = {}
         self.max_clients = max_clients
         self.max_clients_per_user = max_clients_per_user
         self.last_update: float | None = None
@@ -335,11 +354,26 @@ class Hub:
         self.clients.add(client)
         if user_id is not None:
             self._per_user[user_id] += 1
+        self._by_user.setdefault(user_id if user_id is not None else LOCAL_USER_KEY, set()).add(client)
         metrics.ws_clients.set(len(self.clients))
         client.start()
         return client
 
+    def notify_user(self, user_id: str) -> int:
+        """Send a paper_changed notice to every connected socket of one user. Returns how many were
+        notified. Other users' sockets are never touched."""
+        sockets = tuple(self._by_user.get(user_id, ()))
+        for client in sockets:
+            client.notify_paper()
+        return len(sockets)
+
     def _remove(self, client: ClientSession) -> None:
+        key = client.user_id if client.user_id is not None else LOCAL_USER_KEY
+        bucket = self._by_user.get(key)
+        if bucket is not None:
+            bucket.discard(client)
+            if not bucket:
+                del self._by_user[key]
         if client in self.clients:
             self.clients.discard(client)
             if client.user_id is not None:

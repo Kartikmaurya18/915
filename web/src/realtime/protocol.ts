@@ -29,7 +29,7 @@ export interface HelloMsg { type: "hello"; heartbeat_s: number; max_topics: numb
 export interface HeartbeatMsg { type: "heartbeat"; t: number; feed_age_ms: number | null }
 export interface ErrorMsg { type: "error"; code: string; message: string; topic?: string }
 export interface OtherMsg {
-  type: "subscribed" | "unsubscribed" | "auth_ok" | "pong" | "rate_limited";
+  type: "subscribed" | "unsubscribed" | "auth_ok" | "pong" | "rate_limited" | "paper_changed";
   [key: string]: unknown;
 }
 export type ServerMsg = SnapshotMsg | PatchMsg | HelloMsg | HeartbeatMsg | ErrorMsg | OtherMsg;

@@ -23,11 +23,31 @@ def make_candle(open_time, close_time, o=100.0, h=110.0, l=95.0, c=105.0, ticks=
     )
 
 
-@pytest.fixture
-def store(tmp_path):
-    s = PersistenceStore(tmp_path / "test.db")
+@pytest.fixture(params=["sqlite", "sql"])
+def store(request, tmp_path, monkeypatch):
+    """Every behaviour below must hold for BOTH backends: the original SQLite file store and the
+    shared-database store (SQLite here; PostgreSQL when TEST_DATABASE_URL is set)."""
+    if request.param == "sqlite":
+        s = PersistenceStore(tmp_path / "test.db")
+        yield s
+        s.close()
+        return
+
+    from src.db import session as db_session
+    from src.db.history import SqlPersistenceStore
+    from src.db.migrate import downgrade_to_base, upgrade_to_head
+    from tests.conftest import external_test_database_url
+
+    external = external_test_database_url()
+    monkeypatch.setenv("DATABASE_URL", external or f"sqlite:///{(tmp_path / 'sql.db').as_posix()}")
+    db_session.reset_engine()
+    if external:
+        downgrade_to_base()
+    upgrade_to_head()
+    s = SqlPersistenceStore()
     yield s
     s.close()
+    db_session.reset_engine()
 
 
 def test_save_and_read_back_candle(store):
