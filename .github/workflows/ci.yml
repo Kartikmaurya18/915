@@ -48,9 +48,60 @@ jobs:
           pip install pip-audit
           pip-audit -r requirements.txt
 
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  web-e2e:
+    # The browser code paths (HTTP wrapper + realtime client) against a real server with real auth.
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: sqlite:///${{ runner.temp }}/e2e.db
+      AUTH_MODE: required
+      JWT_SECRET: ci-only-secret-0123456789abcdef0123456789ab
+      MARKET_DATA_PROVIDER: mock
+      POLL_INTERVAL_SECONDS: "1"
+      COOKIE_SECURE: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: pip install -r requirements.txt
+      - run: cd web && npm ci && npm run build
+      - run: alembic upgrade head
+      - name: Start the server
+        run: |
+          nohup python -m uvicorn src.api.server:app --host 127.0.0.1 --port 8010 --ws-max-size 65536 > server.log 2>&1 &
+          for i in $(seq 1 40); do curl -sf http://127.0.0.1:8010/api/health && break; sleep 1; done
+      - name: Live end-to-end tests
+        run: cd web && E2E_BASE_URL=http://127.0.0.1:8010 npm run test:e2e
+      - name: Server log
+        if: failure()
+        run: tail -n 80 server.log
+
   docker:
     runs-on: ubuntu-latest
-    needs: backend
+    needs: [backend, web]
     steps:
       - uses: actions/checkout@v4
       - name: Build image
@@ -58,3 +109,5 @@ jobs:
       - name: The image can import every entrypoint
         # Catches a dependency that works locally but is missing from requirements.txt.
         run: docker run --rm market-data:ci python -c "import src.api.server, src.ingestor; print('ok')"
+      - name: The image ships the built web app
+        run: docker run --rm market-data:ci test -f web/dist/index.html

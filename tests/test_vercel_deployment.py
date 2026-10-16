@@ -149,7 +149,8 @@ def test_fastapi_endpoints_reachable_via_vercel_entrypoint():
         res = requests.get(f"{base_url}/", timeout=3)
         assert res.status_code == 200
         assert "text/html" in res.headers.get("content-type", "")
-        assert "NIFTY Option Terminal" in res.text
+        # The legacy page, or the React shell when web/dist has been built (see src/api/spa.py).
+        assert "NIFTY Option Terminal" in res.text or '<div id="root">' in res.text
 
         # 10. Frontend static asset routes
         res = requests.get(f"{base_url}/static/css/styles.css", timeout=3)

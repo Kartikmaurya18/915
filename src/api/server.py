@@ -18,6 +18,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 
 from src.api.auth_routes import router as auth_router
+from src.api.spa import install_spa, spa_dist
 from src.auth import settings as auth_settings
 from src.auth.deps import AuthUser, authenticate_token, current_user, require_admin
 from src.auth.security import AuthError, decode_access_token
@@ -781,10 +782,17 @@ if not IS_SERVERLESS:
     if frontend_dir.exists():
         app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
 
-    @app.get("/")
-    async def index() -> FileResponse:
-        index_file = ROOT / "public" / "index.html" if (ROOT / "public" / "index.html").exists() else ROOT / "frontend" / "index.html"
-        return FileResponse(index_file)
+    _spa_dist = spa_dist(ROOT)
+    if _spa_dist is not None:
+        # The React app (web/dist) owns "/" and every client-side route; "/static" above still
+        # serves the legacy assets, and FRONTEND=legacy restores the old UI without a rebuild.
+        install_spa(app, _spa_dist)
+    else:
+
+        @app.get("/")
+        async def index() -> FileResponse:
+            index_file = ROOT / "public" / "index.html" if (ROOT / "public" / "index.html").exists() else ROOT / "frontend" / "index.html"
+            return FileResponse(index_file)
 
 
 @app.middleware("http")
@@ -823,6 +831,8 @@ async def security_headers_and_frontend_cache(request: Request, call_next):
         response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
     if request.url.path == "/" or request.url.path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    elif request.url.path.startswith("/assets/"):
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"  # content-hashed file names
     elif request.url.path.startswith("/api/"):
         response.headers.setdefault("Cache-Control", "no-store")
     return response

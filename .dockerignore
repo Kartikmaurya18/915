@@ -9,3 +9,5 @@ data/*.db
 data/*.db-*
 tests
 *.md
+web/node_modules
+web/dist
