@@ -29,7 +29,6 @@ from src.paper_trading import PaperPosition, PaperTradeConfig, PaperTradingEngin
 from src.risk import EXIT_MANUAL
 from src.persistence import PersistenceStore, ensure_seeded
 from src.price_calculator import get_calculator
-from src.rrg import RRGCalculator, RRGConfig
 from src.serializers import (
     _empty_paper_stats,
     _empty_pnl_summary,
@@ -113,6 +112,10 @@ class MarketEngine:
         # Initialize RRG calculator if enabled
         self._rrg_calculator = None
         if self.cfg.get("enable_rrg", False):
+            # Imported here, not at module level: RRG pulls in pandas (and matplotlib), which are
+            # slow to import and ~100 MB of RAM, and a gateway or a default deployment never needs them.
+            from src.rrg import RRGCalculator, RRGConfig
+
             rrg_config = RRGConfig(
                 benchmark_symbol=self.underlying,
                 timeframe=self.cfg.get("rrg_timeframe", "1min"),

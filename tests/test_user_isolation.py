@@ -11,7 +11,7 @@ from src.api import server
 from src.db.models import AuditLog, IdempotencyKey, PaperPositionRow
 from src.db.session import session_scope
 from src.paper import service as paper_service
-from src.paper.service import UserPaperService
+from src.paper.exit_worker import PaperExitWorker
 
 
 def _open(client, headers, contract, option_type="CE", quantity=50, **extra):
@@ -95,8 +95,7 @@ def test_auto_exit_fires_only_for_the_user_whose_threshold_was_hit(client, new_u
     alice_id = _open(client, alice, contract).json()["id"]
     bob_id = _open(client, bob, contract).json()["id"]
 
-    svc = server.get_paper_service()
-    svc.on_chain(chain_with_call_move(strike, 1.25), datetime.now(timezone.utc))  # CE +25%
+    PaperExitWorker().on_chain(chain_with_call_move(strike, 1.25), datetime.now(timezone.utc))  # CE +25%
 
     alice_state = _state(client, alice)
     assert alice_state["open_positions"] == []
@@ -121,7 +120,7 @@ def test_stop_loss_exit_is_per_user_and_persisted(client, new_user, contract, ch
     strike = contract[0]
     _, alice = new_user()
     position_id = _open(client, alice, contract).json()["id"]
-    server.get_paper_service().on_chain(chain_with_call_move(strike, 0.8), datetime.now(timezone.utc))  # CE -20%
+    PaperExitWorker().on_chain(chain_with_call_move(strike, 0.8), datetime.now(timezone.utc))  # CE -20%
     history = _state(client, alice)["history"]
     assert history[0]["exit_reason"] == "STOP_LOSS" and history[0]["pnl"] < 0
     assert history[0]["id"] == position_id
@@ -144,14 +143,15 @@ def test_positions_and_history_survive_a_restart(client, new_user, contract, cha
     assert state["config"]["take_profit_percent"] == 33
 
 
-def test_restart_rehydrates_open_positions_so_take_profit_keeps_working(client, new_user, contract, chain_with_call_move):
+def test_exits_are_driven_by_the_database_so_a_new_worker_needs_no_warm_up(client, new_user, contract, chain_with_call_move):
+    """There is no in-memory book to rebuild after a restart or failover: a brand new exit
+    worker (a new leader) evaluates whatever the database says is open."""
     strike = contract[0]
     _, alice = new_user()
     _open(client, alice, contract)
     server.reset_paper_service()
 
-    restarted = server.get_paper_service()  # start() reloads every user with an open position
-    restarted.on_chain(chain_with_call_move(strike, 1.3), datetime.now(timezone.utc))
+    PaperExitWorker().on_chain(chain_with_call_move(strike, 1.3), datetime.now(timezone.utc))
     assert _state(client, alice)["history"][0]["exit_reason"] == "TAKE_PROFIT"
 
 
@@ -269,15 +269,3 @@ def test_deleting_a_user_removes_their_trading_data(client, new_user, contract):
         session.delete(session.query(User).filter_by(email=email).one())
     with session_scope() as session:
         assert session.query(PaperPositionRow).count() == 0  # ON DELETE CASCADE
-
-
-def test_book_cache_evicts_idle_users_but_never_ones_with_open_positions(client, new_user, contract, monkeypatch):
-    monkeypatch.setattr(paper_service, "BOOK_CACHE_MAX", 2)
-    _, holder = new_user()
-    _open(client, holder, contract)
-    for _ in range(4):
-        _, idle = new_user()
-        _state(client, idle)
-    svc: UserPaperService = server.get_paper_service()
-    assert len(svc._books) <= 3
-    assert len(_state(client, holder)["open_positions"]) == 1

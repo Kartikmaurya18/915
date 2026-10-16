@@ -178,11 +178,16 @@ def logout(session: Session, raw_token: str | None, ip: str | None = None) -> No
 
 
 def _revoke_family(session: Session, family_id: str, now: datetime) -> None:
-    session.execute(
-        update(RefreshToken)
+    # Lock the family's live tokens in a fixed order first. Concurrent revocations (every loser
+    # of a refresh race runs one) otherwise lock the same rows in different orders and deadlock.
+    ids = session.scalars(
+        select(RefreshToken.id)
         .where(RefreshToken.family_id == family_id, RefreshToken.revoked_at.is_(None))
-        .values(revoked_at=now)
-    )
+        .order_by(RefreshToken.id)
+        .with_for_update()
+    ).all()
+    if ids:
+        session.execute(update(RefreshToken).where(RefreshToken.id.in_(ids)).values(revoked_at=now))
 
 
 def set_role(session: Session, email: str, role: str) -> User:

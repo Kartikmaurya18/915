@@ -9,13 +9,21 @@ and the pool/timeout environment variables below - no code depends on them.
 from __future__ import annotations
 
 import os
+import random
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator, TypeVar
 
+from prometheus_client import Counter
 from sqlalchemy import Engine, create_engine, event
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
+
+T = TypeVar("T")
+
+transaction_retries = Counter("db_transaction_retries_total", "Transactions retried after a deadlock or lock timeout", ["reason"])
 
 DEFAULT_SQLITE_URL = "sqlite:///data/app.db"
 
@@ -97,6 +105,36 @@ def session_scope() -> Iterator[Session]:
         raise
     finally:
         session.close()
+
+
+# PostgreSQL: 40P01 deadlock_detected, 40001 serialization_failure. SQLite: a busy database.
+_RETRYABLE_SQLSTATES = {"40P01": "deadlock", "40001": "serialization"}
+
+
+def _retry_reason(exc: OperationalError) -> str | None:
+    state = getattr(exc.orig, "sqlstate", None)
+    if state in _RETRYABLE_SQLSTATES:
+        return _RETRYABLE_SQLSTATES[state]
+    if "database is locked" in str(exc.orig).lower():
+        return "locked"
+    return None
+
+
+def run_in_transaction(work: Callable[[Session], T], retries: int = 3) -> T:
+    """Run `work(session)` in one transaction, retrying the WHOLE thing if the database picked
+    it as a deadlock victim (or reports a serialization failure). Safe because a victim has
+    already been rolled back; `work` must therefore hold no side effects outside the session."""
+    for attempt in range(retries + 1):
+        try:
+            with session_scope() as session:
+                return work(session)
+        except OperationalError as exc:
+            reason = _retry_reason(exc)
+            if reason is None or attempt >= retries:
+                raise
+            transaction_retries.labels(reason).inc()
+            time.sleep(random.uniform(0.005, 0.03) * (attempt + 1))  # jitter, so the victims do not collide again
+    raise AssertionError("unreachable")
 
 
 def reset_engine() -> None:

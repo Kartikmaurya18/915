@@ -14,6 +14,23 @@ jobs:
     env:
       PERSISTENCE_DB_PATH: ${{ runner.temp }}/ci_market_data.db
       MARKET_DATA_PROVIDER: mock
+      # Optional suites that need real services (skipped locally when these are unset).
+      TEST_REDIS_URL: redis://localhost:6379/0
+      TEST_DATABASE_URL: postgresql://postgres:testpw@localhost:5432/marketdata_test
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 3s --health-retries 10
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: testpw
+          POSTGRES_DB: marketdata_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d marketdata_test" --health-interval 5s --health-timeout 3s --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -21,6 +38,8 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
+      # Everything, with the DB-backed suites running against PostgreSQL and the real-time
+      # suites against Redis (this includes ingestor failover and fencing).
       - name: Tests
         run: python -m pytest -q
       - name: Dependency audit (advisory)
@@ -36,3 +55,6 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build image
         run: docker build -t market-data:ci .
+      - name: The image can import every entrypoint
+        # Catches a dependency that works locally but is missing from requirements.txt.
+        run: docker run --rm market-data:ci python -c "import src.api.server, src.ingestor; print('ok')"

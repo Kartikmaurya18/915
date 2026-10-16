@@ -36,6 +36,23 @@ def external_test_database_url() -> str | None:
     return url
 
 
+def publish_market(engine, server, timeout: float = 5.0) -> dict:
+    """Tick the engine once and push the snapshot through the real publish path, then wait
+    until the gateway hub holds the option chain (paper trading prices come from the hub)."""
+    import time
+
+    server.rt_hub = server.Hub()
+    server._publisher.new_epoch(int(time.time() * 1000))
+    snapshot = engine.tick_once()
+    assert snapshot is not None
+    server._broadcast(snapshot)
+    deadline = time.time() + timeout
+    while server.rt_hub.latest("options:NIFTY") is None:
+        assert time.time() < deadline, "market data never reached the hub"
+        time.sleep(0.01)
+    return snapshot
+
+
 @pytest.fixture
 def auth_env(monkeypatch, tmp_path):
     """AUTH_MODE=required against a fresh, fully migrated SQLite database.
@@ -60,8 +77,11 @@ def auth_env(monkeypatch, tmp_path):
     if external:  # shared database: start every test from empty tables
         from sqlalchemy import text
 
+        # DELETE in dependency order (USER_TABLES is already children-first). TRUNCATE would take an
+        # ACCESS EXCLUSIVE lock and rewrite files: slow, and it blocks behind any other session.
         with db_session.get_engine().begin() as connection:
-            connection.execute(text("TRUNCATE " + ", ".join(USER_TABLES) + " RESTART IDENTITY CASCADE"))
+            for table in USER_TABLES:
+                connection.execute(text(f"DELETE FROM {table}"))
     for limiter in (auth_routes.login_by_ip, auth_routes.login_by_account, auth_routes.register_by_ip):
         limiter.clear()
     yield
@@ -79,11 +99,12 @@ def client(auth_env, monkeypatch):
     """
     from fastapi.testclient import TestClient
 
+    from src.api import server
     from src.api.server import app, engine
 
     monkeypatch.setattr(engine, "start", lambda: None)
     with TestClient(app) as test_client:
-        engine.tick_once()  # make sure an option chain exists before any trade
+        publish_market(engine, server)  # an option chain must exist, in the hub, before any trade
         yield test_client
 
 

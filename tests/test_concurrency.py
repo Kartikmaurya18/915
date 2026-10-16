@@ -11,7 +11,7 @@ from src.api import server
 from src.auth import service
 from src.auth.security import AuthError
 from src.db.models import PaperPositionRow, RefreshToken, User
-from src.db.session import session_scope
+from src.db.session import run_in_transaction, session_scope
 
 THREADS = 8
 # A race is only exposed some of the time, so each test repeats it with fresh
@@ -54,8 +54,7 @@ def test_exactly_one_concurrent_refresh_wins(client):
             raw = service.start_session(session, session.get(User, user_id)).refresh_token
 
         def refresh(_i, raw=raw):
-            with session_scope() as session:
-                return service.refresh(session, raw).access_token
+            return run_in_transaction(lambda s: service.refresh(s, raw)).access_token  # as the route does
 
         outcomes = _run_together(refresh)
         winners = [o for o in outcomes if isinstance(o, str)]
@@ -73,8 +72,7 @@ def test_losing_a_refresh_race_revokes_the_session_family(client):
     user_id, raw = _register("strict@example.com")
 
     def refresh(_i):
-        with session_scope() as session:
-            return service.refresh(session, raw)
+        return run_in_transaction(lambda s: service.refresh(s, raw))
 
     _run_together(refresh)
     with session_scope() as session:

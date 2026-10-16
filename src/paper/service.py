@@ -1,46 +1,45 @@
-"""Per-user paper trading, backed by the database.
+"""Per-user paper trading, stateless: the database is the only source of truth.
 
-Every user gets their own `PaperTradingEngine` (the existing, unchanged
-simulation logic), hydrated from the database on first use and written through
-on every open / close / auto-exit. The database is the source of truth; the
-in-memory books exist so each market tick can mark positions to market and fire
-TP/SL exits without a query per user per tick.
+Nothing about a user's book is cached in this process, so any number of gateway
+replicas can serve any user, and a restart loses nothing. Prices come from a
+`MarketView` (the hub's latest topic state). Take-profit / stop-loss exits are NOT
+decided here - a single exit worker (src/paper/exit_worker.py), running next to the
+engine, scans open positions on every tick.
 
 Isolation rules enforced here:
   * every query filters on `user_id`, taken from the authenticated principal -
     never from request input;
-  * a position id from another user is indistinguishable from a missing one.
-
-Known Phase-1 limits (addressed in Phase 2 when the engine moves to a dedicated
-ingestor worker): the book cache is per-process, and TP/SL exit writes happen on
-the tick thread.
+  * a position id from another user is indistinguishable from a missing one;
+  * closing is a conditional UPDATE (`... WHERE status = 'OPEN'`), so a manual close
+    racing an automatic exit has exactly one winner.
 """
 
 from __future__ import annotations
 
 import os
-import threading
-from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 
 from src.auth.service import audit
 from src.db.models import IdempotencyKey, PaperPositionRow, PaperSettings
 from src.db.session import session_scope
 from src.execution import OrderRequest, PaperExecutionClient
+from src.paper.market_view import NoQuote
 from src.paper_trading import EXIT_MANUAL, PaperPosition, PaperTradeConfig, PaperTradingEngine
 from src.timeutil import trading_date_str
 
 MAX_OPEN_POSITIONS = int(os.getenv("PAPER_MAX_OPEN_POSITIONS", "100"))
 MAX_QUANTITY = int(os.getenv("PAPER_MAX_QUANTITY", "100000"))
-BOOK_CACHE_MAX = int(os.getenv("PAPER_BOOK_CACHE_MAX", "5000"))
 
 
 class PaperError(ValueError):
     """A request the user can fix (bad input, limit reached, no such contract)."""
+
+
+# -- row <-> position -----------------------------------------------------------------
 
 
 def row_to_position(row: PaperPositionRow) -> PaperPosition:
@@ -70,35 +69,48 @@ def row_to_position(row: PaperPositionRow) -> PaperPosition:
     )
 
 
-def _apply_position(row: PaperPositionRow, pos: PaperPosition) -> None:
-    row.option_type = pos.option_type
-    row.side = pos.side
-    row.strike = pos.strike
-    row.quantity = pos.quantity
-    row.entry_price = pos.entry_price
-    row.current_price = pos.current_price
-    row.entry_time = pos.entry_time
-    row.take_profit_percent = pos.take_profit_percent
-    row.stop_loss_percent = pos.stop_loss_percent
-    row.take_profit_amount = pos.take_profit_amount
-    row.stop_loss_amount = pos.stop_loss_amount
-    row.status = pos.status
-    row.exit_price = pos.exit_price
-    row.exit_time = pos.exit_time
-    row.exit_reason = pos.exit_reason
-    row.pnl = pos.pnl
-    row.pnl_percent = pos.pnl_percent
-    row.underlying = pos.underlying
-    row.expiry = pos.expiry
-    row.exchange = pos.exchange
-    row.instrument_id = pos.instrument_id
-    row.trading_date = trading_date_str(pos.entry_time)
+def position_values(pos: PaperPosition) -> dict:
+    """Column values for `pos`, usable for INSERT and for a conditional UPDATE."""
+    return {
+        "option_type": pos.option_type,
+        "side": pos.side,
+        "strike": pos.strike,
+        "quantity": pos.quantity,
+        "entry_price": pos.entry_price,
+        "current_price": pos.current_price,
+        "entry_time": pos.entry_time,
+        "take_profit_percent": pos.take_profit_percent,
+        "stop_loss_percent": pos.stop_loss_percent,
+        "take_profit_amount": pos.take_profit_amount,
+        "stop_loss_amount": pos.stop_loss_amount,
+        "status": pos.status,
+        "exit_price": pos.exit_price,
+        "exit_time": pos.exit_time,
+        "exit_reason": pos.exit_reason,
+        "pnl": pos.pnl,
+        "pnl_percent": pos.pnl_percent,
+        "underlying": pos.underlying,
+        "expiry": pos.expiry,
+        "exchange": pos.exchange,
+        "instrument_id": pos.instrument_id,
+        "trading_date": trading_date_str(pos.entry_time),
+    }
 
 
 def position_to_row(user_id: str, pos: PaperPosition) -> PaperPositionRow:
-    row = PaperPositionRow(user_id=user_id, id=pos.id)
-    _apply_position(row, pos)
-    return row
+    return PaperPositionRow(user_id=user_id, id=pos.id, **position_values(pos))
+
+
+def close_if_open(session, user_id: str, pos: PaperPosition) -> bool:
+    """Persist a just-closed position only if the database still has it OPEN.
+    Returns False if someone else (a manual close, the exit worker) got there first."""
+    values = position_values(pos)
+    result = session.execute(
+        update(PaperPositionRow)
+        .where(PaperPositionRow.user_id == user_id, PaperPositionRow.id == pos.id, PaperPositionRow.status == "OPEN")
+        .values(**values)
+    )
+    return result.rowcount == 1
 
 
 def row_to_persisted_trade(row: PaperPositionRow) -> dict:
@@ -125,101 +137,53 @@ def row_to_persisted_trade(row: PaperPositionRow) -> dict:
     }
 
 
-class UserPaperService:
-    def __init__(self, engine):
-        self._engine = engine
-        self._books: "OrderedDict[str, PaperTradingEngine]" = OrderedDict()
-        self._lock = threading.Lock()
-        self._failed_writes: list[tuple[str, PaperPosition]] = []
-        self._started = False
+def default_config(cfg: dict | None = None) -> PaperTradeConfig:
+    paper = (cfg or {}).get("paper_trading") or {}
+    return PaperTradeConfig(
+        take_profit_percent=float(paper.get("take_profit_percent", 10.0)),
+        stop_loss_percent=float(paper.get("stop_loss_percent", 5.0)),
+        take_profit_amount=paper.get("take_profit_amount"),
+        stop_loss_amount=paper.get("stop_loss_amount"),
+    )
 
-    # -- lifecycle -----------------------------------------------------------
 
-    def start(self) -> None:
-        """Rehydrate every user who still has open positions (so their TP/SL keeps
-        working after a restart) and subscribe to the tick pipeline."""
-        if self._started:
-            return
-        with session_scope() as session:
-            user_ids = session.scalars(
-                select(PaperPositionRow.user_id).where(PaperPositionRow.status == "OPEN").distinct()
-            ).all()
-        for user_id in user_ids:
-            self._book(user_id)
-        self._engine.add_chain_listener(self.on_chain)
-        self._started = True
+# -- the service ----------------------------------------------------------------------
 
-    def stop(self) -> None:
-        self._engine.remove_chain_listener(self.on_chain)
-        self._started = False
 
-    # -- books ---------------------------------------------------------------
+class PaperService:
+    def __init__(self, view, defaults: PaperTradeConfig | None = None):
+        self._view = view
+        self._defaults = defaults or default_config()
 
-    def _default_config(self) -> PaperTradeConfig:
-        cfg = (self._engine.cfg.get("paper_trading") or {}) if hasattr(self._engine, "cfg") else {}
+    def _config_for(self, session, user_id: str) -> PaperTradeConfig:
+        row = session.get(PaperSettings, user_id)
+        if row is None:
+            return PaperTradeConfig(**self._defaults.as_dict())
         return PaperTradeConfig(
-            take_profit_percent=float(cfg.get("take_profit_percent", 10.0)),
-            stop_loss_percent=float(cfg.get("stop_loss_percent", 5.0)),
-            take_profit_amount=cfg.get("take_profit_amount"),
-            stop_loss_amount=cfg.get("stop_loss_amount"),
+            take_profit_percent=row.take_profit_percent,
+            stop_loss_percent=row.stop_loss_percent,
+            take_profit_amount=row.take_profit_amount,
+            stop_loss_amount=row.stop_loss_amount,
         )
-
-    def _hydrate(self, user_id: str) -> PaperTradingEngine:
-        with session_scope() as session:
-            settings_row = session.get(PaperSettings, user_id)
-            rows = session.scalars(
-                select(PaperPositionRow)
-                .where(PaperPositionRow.user_id == user_id)
-                .order_by(PaperPositionRow.entry_time.asc())
-            ).all()
-            if settings_row is not None:
-                config = PaperTradeConfig(
-                    take_profit_percent=settings_row.take_profit_percent,
-                    stop_loss_percent=settings_row.stop_loss_percent,
-                    take_profit_amount=settings_row.take_profit_amount,
-                    stop_loss_amount=settings_row.stop_loss_amount,
-                )
-            else:
-                config = self._default_config()
-            open_positions = [row_to_position(r) for r in rows if r.status == "OPEN"]
-            closed = sorted(
-                (r for r in rows if r.status != "OPEN"),
-                key=lambda r: r.exit_time or r.entry_time,
-            )
-            history = [row_to_position(r) for r in closed]
-        book = PaperTradingEngine(config)
-        book.load_state(open_positions, history)
-        return book
-
-    def _book(self, user_id: str) -> PaperTradingEngine:
-        with self._lock:
-            book = self._books.get(user_id)
-            if book is not None:
-                self._books.move_to_end(user_id)
-                return book
-        # Hydrate outside the lock: it does I/O. A concurrent hydrate for the
-        # same user is harmless - setdefault keeps exactly one book.
-        fresh = self._hydrate(user_id)
-        with self._lock:
-            book = self._books.setdefault(user_id, fresh)
-            self._books.move_to_end(user_id)
-            self._evict_locked()
-            return book
-
-    def _evict_locked(self) -> None:
-        """Bound memory: drop least-recently-used books that hold no open positions."""
-        if len(self._books) <= BOOK_CACHE_MAX:
-            return
-        for uid in list(self._books.keys()):
-            if len(self._books) <= BOOK_CACHE_MAX:
-                break
-            if not self._books[uid].get_open_positions():
-                del self._books[uid]
 
     # -- reads ---------------------------------------------------------------
 
     def state(self, user_id: str) -> dict:
-        return self._book(user_id).to_state_dict()
+        with session_scope() as session:
+            config = self._config_for(session, user_id)
+            rows = session.scalars(
+                select(PaperPositionRow).where(PaperPositionRow.user_id == user_id).order_by(PaperPositionRow.entry_time.asc())
+            ).all()
+            open_positions = [row_to_position(r) for r in rows if r.status == "OPEN"]
+            closed = sorted((r for r in rows if r.status != "OPEN"), key=lambda r: r.exit_time or r.entry_time)
+            history = [row_to_position(r) for r in closed]
+        for pos in open_positions:  # mark to the latest market price for display (exits are the worker's job)
+            price = self._view.leg_price(pos.option_type, pos.strike)
+            if price is not None:
+                pos.mark_to_market(price)
+        book = PaperTradingEngine(config)
+        book.load_state(open_positions, history)
+        return book.to_state_dict()
 
     def trades_for_date(self, user_id: str, trading_date: str) -> list[dict]:
         with session_scope() as session:
@@ -244,28 +208,23 @@ class UserPaperService:
         take_profit_amount: Optional[float],
         stop_loss_amount: Optional[float],
     ) -> dict:
-        book = self._book(user_id)
-        before = book.get_config()
-        try:
-            config = book.set_config(take_profit_percent, stop_loss_percent, take_profit_amount, stop_loss_amount)
-        except ValueError as exc:
-            raise PaperError(str(exc)) from exc
-        try:
-            with session_scope() as session:
-                row = session.get(PaperSettings, user_id)
-                if row is None:
-                    row = PaperSettings(user_id=user_id)
-                    session.add(row)
-                row.take_profit_percent = config.take_profit_percent
-                row.stop_loss_percent = config.stop_loss_percent
-                row.take_profit_amount = config.take_profit_amount
-                row.stop_loss_amount = config.stop_loss_amount
-                row.updated_at = datetime.now(timezone.utc)
-                audit(session, "paper_config_changed", user_id, None, config.as_dict())
-        except Exception:
-            book.replace_config(before)  # keep memory consistent with the database
-            raise
-        return config.as_dict()
+        with session_scope() as session:
+            scratch = PaperTradingEngine(self._config_for(session, user_id))
+            try:
+                config = scratch.set_config(take_profit_percent, stop_loss_percent, take_profit_amount, stop_loss_amount)
+            except ValueError as exc:  # validated BEFORE anything is written
+                raise PaperError(str(exc)) from exc
+            row = session.get(PaperSettings, user_id)
+            if row is None:
+                row = PaperSettings(user_id=user_id)
+                session.add(row)
+            row.take_profit_percent = config.take_profit_percent
+            row.stop_loss_percent = config.stop_loss_percent
+            row.take_profit_amount = config.take_profit_amount
+            row.stop_loss_amount = config.stop_loss_amount
+            row.updated_at = datetime.now(timezone.utc)
+            audit(session, "paper_config_changed", user_id, None, config.as_dict())
+            return config.as_dict()
 
     def open_position(
         self,
@@ -284,21 +243,27 @@ class UserPaperService:
             stored = self._stored_response(user_id, idempotency_key)
             if stored is not None:
                 return stored
-        book = self._book(user_id)
-        if len(book.get_open_positions()) >= MAX_OPEN_POSITIONS:
+        with session_scope() as session:
+            open_count = session.scalar(
+                select(func.count()).select_from(PaperPositionRow).where(
+                    PaperPositionRow.user_id == user_id, PaperPositionRow.status == "OPEN"
+                )
+            )
+            config = self._config_for(session, user_id)
+        if open_count >= MAX_OPEN_POSITIONS:
             raise PaperError(f"Open position limit reached ({MAX_OPEN_POSITIONS}). Close one first.")
         try:
-            quote, timestamp = self._engine.resolve_paper_quote(option_type, strike, expiry, underlying)
-            result = PaperExecutionClient(book).place_order(
+            contract, ltp, timestamp = self._view.quote(option_type, strike, expiry, underlying)
+            result = PaperExecutionClient(PaperTradingEngine(config)).place_order(
                 OrderRequest(
-                    contract=quote.contract,
+                    contract=contract,
                     side=(side or "BUY").upper(),
                     quantity=int(quantity),
-                    reference_price=quote.ltp,
+                    reference_price=ltp,
                     timestamp=timestamp,
                 )
             )
-        except ValueError as exc:
+        except (NoQuote, ValueError) as exc:
             raise PaperError(str(exc)) from exc
         position: PaperPosition = result.position
         response = position.to_dict()
@@ -316,66 +281,24 @@ class UserPaperService:
                 )
         except IntegrityError:
             # A concurrent request with the same idempotency key won the race.
-            book.discard_open(position.id)
             stored = self._stored_response(user_id, idempotency_key) if idempotency_key else None
             if stored is not None:
                 return stored
             raise
-        except Exception:
-            book.discard_open(position.id)
-            raise
         return response
 
     def close_position(self, user_id: str, position_id: str) -> Optional[dict]:
-        book = self._book(user_id)
-        position = next((p for p in book.get_open_positions() if p.id == position_id), None)
-        if position is None:
-            return None  # not found, already closed, or someone else's: indistinguishable
-        price = self._engine.current_leg_price(position.option_type, position.strike)
-        if price is None:
-            price = position.current_price
-        closed = book.close_position(position_id, price, self._engine.latest_tick_time(), EXIT_MANUAL)
-        if closed is None:
-            return None
-        self._persist_closed(user_id, closed, "paper_close")
-        return closed.to_dict()
-
-    # -- tick pipeline -------------------------------------------------------
-
-    def on_chain(self, chain, timestamp) -> None:
-        """Called by the engine on every tick: mark every user's open positions
-        to market and persist whatever TP/SL closed."""
-        if self._failed_writes:
-            retry, self._failed_writes = self._failed_writes, []
-            for uid, pos in retry:
-                self._persist_closed(uid, pos, "paper_auto_exit")
-        with self._lock:
-            targets = [(uid, book) for uid, book in self._books.items() if book.get_open_positions()]
-        for user_id, book in targets:
-            for pos in book.update(chain, timestamp):
-                self._persist_closed(user_id, pos, "paper_auto_exit")
-
-    def _persist_closed(self, user_id: str, pos: PaperPosition, event: str) -> None:
-        try:
-            with session_scope() as session:
-                row = session.get(PaperPositionRow, (user_id, pos.id))
-                if row is None:
-                    row = position_to_row(user_id, pos)
-                    session.add(row)
-                else:
-                    _apply_position(row, pos)
-                audit(
-                    session,
-                    event,
-                    user_id,
-                    None,
-                    {"id": pos.id, "reason": pos.exit_reason, "pnl": round(pos.pnl, 2)},
-                )
-        except Exception:
-            # Memory says closed, the database still says open. Retry on the next
-            # tick; if the process dies first, the position simply reopens on
-            # restart (the database is the source of truth).
-            self._failed_writes.append((user_id, pos))
+        with session_scope() as session:
+            row = session.get(PaperPositionRow, (user_id, position_id))
+            if row is None or row.status != "OPEN":
+                return None  # not found, already closed, or someone else's: indistinguishable
+            position = row_to_position(row)
+            price = self._view.leg_price(position.option_type, position.strike)
+            position.close(price if price is not None else position.current_price, self._view.latest_time(), EXIT_MANUAL)
+            if not close_if_open(session, user_id, position):
+                return None  # the exit worker closed it between our read and our write
+            audit(session, "paper_close", user_id, None, {"id": position.id, "pnl": round(position.pnl, 2)})
+            return position.to_dict()
 
     def _stored_response(self, user_id: str, key: str) -> Optional[dict]:
         with session_scope() as session:

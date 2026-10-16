@@ -17,7 +17,7 @@ from src.auth import service, settings
 from src.auth.deps import AuthUser, client_ip, current_user
 from src.auth.ratelimit import SlidingWindowLimiter
 from src.db.models import User
-from src.db.session import session_scope
+from src.db.session import run_in_transaction, session_scope
 
 REFRESH_COOKIE = "refresh_token"
 COOKIE_PATH = "/api/auth"
@@ -81,10 +81,11 @@ def register(body: Credentials, request: Request, response: Response) -> dict:
     ip = client_ip(request)
     if not register_by_ip.hit(ip):
         raise _too_many(register_by_ip)
-    with session_scope() as session:
+    def work(session):
         user = service.register(session, body.email, body.password, ip)
-        result = service.start_session(session, user, ip, event="login")
-        return _respond(response, result)
+        return service.start_session(session, user, ip, event="login")
+
+    return _respond(response, run_in_transaction(work))
 
 
 @router.post("/login")
@@ -95,9 +96,7 @@ def login(body: Credentials, request: Request, response: Response) -> dict:
     if login_by_ip.is_blocked(ip) or login_by_account.is_blocked(account):
         raise _too_many(login_by_account)
     try:
-        with session_scope() as session:
-            result = service.login(session, body.email, body.password, ip)
-            payload = _respond(response, result)
+        payload = _respond(response, run_in_transaction(lambda s: service.login(s, body.email, body.password, ip)))
     except service.AuthError:
         login_by_ip.record(ip)
         login_by_account.record(account)
@@ -114,9 +113,8 @@ def refresh(request: Request, response: Response) -> dict:
     if login_by_ip.is_blocked(ip):
         raise _too_many(login_by_ip)
     try:
-        with session_scope() as session:
-            result = service.refresh(session, request.cookies.get(REFRESH_COOKIE), ip)
-            return _respond(response, result)
+        result = run_in_transaction(lambda s: service.refresh(s, request.cookies.get(REFRESH_COOKIE), ip))
+        return _respond(response, result)
     except service.AuthError:
         login_by_ip.record(ip)
         response.delete_cookie(REFRESH_COOKIE, path=COOKIE_PATH)
@@ -127,8 +125,7 @@ def refresh(request: Request, response: Response) -> dict:
 def logout(request: Request, response: Response) -> Response:
     _require_enabled()
     _require_csrf_header(request)
-    with session_scope() as session:
-        service.logout(session, request.cookies.get(REFRESH_COOKIE), client_ip(request))
+    run_in_transaction(lambda s: service.logout(s, request.cookies.get(REFRESH_COOKIE), client_ip(request)))
     response.delete_cookie(REFRESH_COOKIE, path=COOKIE_PATH)
     response.status_code = 204
     return response

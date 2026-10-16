@@ -1,7 +1,23 @@
-# Local development stack: the app plus a throwaway PostgreSQL.
+# Local stack in the production topology:
+#
+#   ingestor1 ─┐                      ┌─ app  (gateway, :8000)
+#              ├─► redis (bus+lease) ─┤
+#   ingestor2 ─┘   (one leads)        └─ app2 (gateway, :8001)
+#                 both ─► db (PostgreSQL)
+#
 #   docker compose up --build
-# Never point this at production data. Real secrets come from your own .env or a
-# secret manager - the values below are development placeholders only.
+#   docker compose stop ingestor1     # watch ingestor2 take over (docker compose logs -f ingestor2)
+#
+# Never point this at production data. Secrets below are development placeholders only;
+# real values come from your own .env or a secret manager.
+x-common-env: &common-env
+  DATABASE_URL: postgresql://marketdata:dev-only-password@db:5432/marketdata
+  REDIS_URL: redis://redis:6379/0
+  AUTH_MODE: required
+  JWT_SECRET: dev-only-jwt-secret-change-me-0123456789abcdef
+  MARKET_DATA_PROVIDER: mock
+  POLL_INTERVAL_SECONDS: "1"
+
 services:
   db:
     image: postgres:16-alpine
@@ -19,28 +35,65 @@ services:
       timeout: 3s
       retries: 10
 
+  redis:
+    image: redis:7-alpine
+    # The bus and lease hold no data worth keeping: every message is superseded by the next tick.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "56379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   migrate:
     build: .
     command: ["alembic", "upgrade", "head"]
-    environment:
-      DATABASE_URL: postgresql://marketdata:dev-only-password@db:5432/marketdata
+    environment: *common-env
     depends_on:
       db:
         condition: service_healthy
 
-  app:
+  ingestor1: &ingestor
+    build: .
+    command: ["python", "-m", "src.ingestor"]
+    environment:
+      <<: *common-env
+      INGESTOR_ID: ingestor1
+      INGESTOR_LEASE_TTL_MS: "4000"
+      INGESTOR_METRICS_PORT: "9100"
+    depends_on:
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  ingestor2:
+    <<: *ingestor
+    environment:
+      <<: *common-env
+      INGESTOR_ID: ingestor2
+      INGESTOR_LEASE_TTL_MS: "4000"
+      INGESTOR_METRICS_PORT: "9100"
+
+  app: &gateway
     build: .
     ports:
       - "8000:8000"
     environment:
-      DATABASE_URL: postgresql://marketdata:dev-only-password@db:5432/marketdata
-      AUTH_MODE: required
-      JWT_SECRET: dev-only-jwt-secret-change-me-0123456789abcdef
-      MARKET_DATA_PROVIDER: mock
-      POLL_INTERVAL_SECONDS: "1"
+      <<: *common-env
+      REALTIME_MODE: gateway
     depends_on:
+      redis:
+        condition: service_healthy
       migrate:
         condition: service_completed_successfully
+
+  app2:
+    <<: *gateway
+    ports:
+      - "8001:8000"
 
 volumes:
   pgdata:

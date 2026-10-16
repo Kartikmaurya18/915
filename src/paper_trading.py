@@ -359,25 +359,13 @@ class PaperTradingEngine:
 
         return exited
 
-    # -- state restore (per-user books are rebuilt from the database) --------
+    # -- state restore (a book is rebuilt from database rows to render a user's state) ----
 
     def load_state(self, open_positions: list[PaperPosition], history: list[PaperPosition]) -> None:
         """Replace the in-memory book with persisted state (oldest-first history)."""
         with self._lock:
             self._positions = {p.id: p for p in open_positions}
             self._history = list(history)
-
-    def replace_config(self, config: PaperTradeConfig) -> None:
-        """Set the config verbatim (including clearing optional ₹ targets) - used to
-        roll back a config change whose database write failed."""
-        with self._lock:
-            self._config = PaperTradeConfig(**config.as_dict())
-
-    def discard_open(self, position_id: str) -> None:
-        """Drop an open position without recording it as a trade — used to roll
-        back an open whose database write failed."""
-        with self._lock:
-            self._positions.pop(position_id, None)
 
     # -- read access ---------------------------------------------------------
 

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import os
+import time
 from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -10,17 +12,29 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 
 from src.api.auth_routes import router as auth_router
 from src.auth import settings as auth_settings
 from src.auth.deps import AuthUser, authenticate_token, current_user, require_admin
-from src.auth.security import AuthError
+from src.auth.security import AuthError, decode_access_token
 from src.config import load_config
 from src.engine import MarketEngine
-from src.paper.service import PaperError, UserPaperService
+from src.paper.exit_worker import PaperExitWorker
+from src.paper.market_view import HubMarketView
+from src.paper.service import PaperError, PaperService, default_config
+from src.realtime import hub as hub_module
+from src.realtime import metrics as rt_metrics
+from src.realtime import protocol as rt_protocol
+from src.realtime import settings as rt_settings
+from src.realtime.control import ControlClient, ControlRemoteError, ControlUnavailable
+from src.realtime.hub import Hub, TopicUpdate, validate_topics
+from src.realtime.publisher import TopicPublisher
+from src.realtime.redis_bus import RedisSubscriber
+from src.realtime.topics import merge_topics
 from src.serializers import summarize_persisted_paper_trades
 
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -29,29 +43,85 @@ MAX_BODY_BYTES = int(os.getenv("MAX_BODY_BYTES", "65536"))
 WS_AUTH_TIMEOUT_SECONDS = float(os.getenv("WS_AUTH_TIMEOUT_SECONDS", "5"))
 WS_MAX_MESSAGE_BYTES = 4096  # clients only ever send a tiny auth/ping frame
 
-engine = MarketEngine(load_config())
+def _engine_config() -> dict:
+    cfg = load_config()
+    if rt_settings.is_gateway():
+        # A gateway never ticks and must not open (or write) the ingestor's history database.
+        cfg["persistence"] = {**(cfg.get("persistence") or {}), "enabled": False}
+    return cfg
+
+
+engine = MarketEngine(_engine_config())
 _ws_clients: set[WebSocket] = set()
 _ws_per_user: Counter[str] = Counter()
 _loop: asyncio.AbstractEventLoop | None = None
-_paper_service: UserPaperService | None = None
+_paper_service: PaperService | None = None
+_exit_worker: PaperExitWorker | None = None
+_redis_subscriber: RedisSubscriber | None = None
+_control: ControlClient | None = None
+
+# Real-time distribution (/ws/v1). The hub is fed either by this process's own engine
+# (embedded mode, below) or by Redis (gateway mode).
+rt_hub = Hub()
 
 
-def get_paper_service() -> UserPaperService:
-    """The per-user paper service (AUTH_MODE=required only), started on first use."""
+def _publish_to_hub(updates: list[TopicUpdate]) -> None:
+    """Called on the engine's tick thread; hand the updates to the event loop."""
+    loop = _loop
+    if loop is None or loop.is_closed():
+        return
+    try:
+        loop.call_soon_threadsafe(rt_hub.apply_updates, updates)
+    except RuntimeError:  # loop shut down between the check and the call
+        pass
+
+
+_publisher = TopicPublisher(_publish_to_hub, engine.underlying)
+
+
+def get_paper_service() -> PaperService:
+    """The per-user paper service (AUTH_MODE=required). Stateless: safe in every gateway replica."""
     global _paper_service
     if _paper_service is None:
-        service = UserPaperService(engine)
-        service.start()
-        _paper_service = service
+        _paper_service = PaperService(HubMarketView(lambda: rt_hub, engine.underlying), default_config(engine.cfg))
     return _paper_service
 
 
+def ensure_exit_worker() -> None:
+    """Register the TP/SL exit worker with the engine. Only the process that owns the engine
+    (embedded mode, or the ingestor) does this; a gateway never decides exits."""
+    global _exit_worker
+    if _exit_worker is None:
+        _exit_worker = PaperExitWorker()
+        engine.add_chain_listener(_exit_worker)
+
+
 def reset_paper_service() -> None:
-    """Drop the cached service (tests, or after the database is swapped)."""
-    global _paper_service
-    if _paper_service is not None:
-        _paper_service.stop()
-    _paper_service = None
+    """Drop the cached service and unregister the exit worker (tests, shutdown)."""
+    global _paper_service, _exit_worker
+    if _exit_worker is not None:
+        engine.remove_chain_listener(_exit_worker)
+    _paper_service = _exit_worker = None
+
+
+def control_client() -> ControlClient:
+    global _control
+    if _control is None:
+        _control = ControlClient()
+    return _control
+
+
+async def engine_call(method: str, *args, **kwargs):
+    """Call an engine method wherever the engine lives: directly (embedded) or via the
+    leading ingestor (gateway). Raises ValueError for bad input in both cases."""
+    if rt_settings.is_gateway():
+        try:
+            return await control_client().call(method, *args, **kwargs)
+        except ControlRemoteError as exc:
+            if exc.kind == "ValueError":
+                raise ValueError(str(exc)) from exc
+            raise
+    return await asyncio.to_thread(getattr(engine, method), *args, **kwargs)
 
 
 def _ensure_engine_running() -> None:
@@ -63,7 +133,7 @@ def _ensure_engine_running() -> None:
     driven per request instead of by a background thread.
     """
     global _loop
-    if IS_SERVERLESS:
+    if IS_SERVERLESS or rt_settings.is_gateway():
         return
     try:
         _loop = asyncio.get_running_loop()
@@ -84,8 +154,11 @@ def _check_schema() -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global _loop
+    global _loop, _redis_subscriber, _control
     auth_settings.validate_startup_config()
+    gateway = rt_settings.is_gateway()
+    if gateway and not auth_settings.auth_required():
+        raise RuntimeError("Refusing to start: REALTIME_MODE=gateway requires AUTH_MODE=required.")
     if auth_settings.auth_required():
         _check_schema()
         get_paper_service()
@@ -93,15 +166,31 @@ async def lifespan(_app: FastAPI):
         _loop = asyncio.get_running_loop()
     except RuntimeError:
         pass
-    engine.unsubscribe(_broadcast)
-    engine.subscribe(_broadcast)
-    # Only start the background tick thread in persistent-server mode (not serverless).
-    if not IS_SERVERLESS:
-        engine.start()
+    if gateway:
+        # Market data arrives from Redis; this process never ticks and never decides exits.
+        _redis_subscriber = RedisSubscriber(rt_hub)
+        _redis_subscriber.start()
+    else:
+        if auth_settings.auth_required():
+            ensure_exit_worker()
+        engine.unsubscribe(_broadcast)
+        engine.subscribe(_broadcast)
+        # Only start the background tick thread in persistent-server mode (not serverless).
+        if not IS_SERVERLESS:
+            engine.start()
     try:
         yield
     finally:
-        engine.unsubscribe(_broadcast)
+        if gateway:
+            if _redis_subscriber is not None:
+                await _redis_subscriber.stop()
+                _redis_subscriber = None
+            if _control is not None:
+                await _control.close()
+                _control = None
+        else:
+            engine.unsubscribe(_broadcast)
+        await rt_hub.close_all()
         reset_paper_service()
         engine.close()
 
@@ -129,6 +218,20 @@ async def _auth_error_handler(_request: Request, exc: AuthError) -> JSONResponse
     )
 
 
+@app.exception_handler(ControlUnavailable)
+async def _control_unavailable_handler(_request: Request, exc: ControlUnavailable) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={"detail": {"code": "ingestor_unavailable", "message": str(exc)}},
+        headers={"Retry-After": "2"},
+    )
+
+
+@app.exception_handler(ControlRemoteError)
+async def _control_remote_error_handler(_request: Request, exc: ControlRemoteError) -> JSONResponse:
+    return JSONResponse(status_code=502, content={"detail": {"code": "ingestor_error", "message": f"{exc.kind}: {exc}"}})
+
+
 def _public_snapshot(snapshot: dict) -> dict:
     """The market snapshot shared with every client. With auth on, the global
     `paper_trading` block (one shared book) is omitted - each user reads their
@@ -139,6 +242,10 @@ def _public_snapshot(snapshot: dict) -> dict:
 
 
 def _broadcast(snapshot: dict) -> None:
+    try:
+        _publisher.on_snapshot(snapshot)  # versioned topic updates for /ws/v1
+    except Exception:  # a publishing bug must never stop the legacy stream or the tick thread
+        rt_metrics.publishes.labels("error").inc()
     if _loop is None or not _ws_clients:
         return
     if getattr(_loop, "is_closed", lambda: True)():
@@ -176,9 +283,15 @@ async def health() -> dict:
 
 @app.get("/api/ready")
 def ready() -> JSONResponse:
-    """Readiness: can this instance do its job right now?"""
+    """Readiness: can this instance do its job right now?
+
+    Feed staleness is reported but does not fail readiness: restarting every gateway because
+    the ingestor is down would only turn a data outage into a full outage."""
     checks: dict[str, str] = {}
-    if not IS_SERVERLESS:
+    gateway = rt_settings.is_gateway()
+    if gateway:
+        checks["redis"] = "ok" if _redis_subscriber is not None and _redis_subscriber.connected else "down"
+    elif not IS_SERVERLESS:
         checks["engine"] = "ok" if engine.is_running else "down"
     if auth_settings.auth_required():
         try:
@@ -189,7 +302,12 @@ def ready() -> JSONResponse:
         except Exception:
             checks["database"] = "unreachable"
     ok = all(v == "ok" for v in checks.values())
-    return JSONResponse(status_code=200 if ok else 503, content={"status": "ready" if ok else "not_ready", "checks": checks})
+    body: dict = {"status": "ready" if ok else "not_ready", "checks": checks}
+    if gateway:
+        age = rt_hub.feed_age_ms()
+        body["feed_age_ms"] = age
+        body["feed"] = "none" if age is None else ("ok" if age < 15_000 else "stale")
+    return JSONResponse(status_code=200 if ok else 503, content=body)
 
 
 # -- Market data (shared, read-only) ---------------------------------------------
@@ -197,6 +315,8 @@ def ready() -> JSONResponse:
 
 @app.get("/api/snapshot")
 async def snapshot(_user: AuthUser = Depends(current_user)) -> dict:
+    if rt_settings.is_gateway():  # rebuild the single-blob shape from the hub's topics
+        return merge_topics({t: st.payload for t, st in rt_hub.states.items()}, engine.underlying)
     return _public_snapshot(engine.get_snapshot())
 
 
@@ -220,14 +340,14 @@ async def history_candles(interval: int = 1, limit: int = 200, _user: AuthUser =
     """Completed candles read back from the persistence store (empty list if disabled)."""
     return {
         "interval_minutes": interval,
-        "candles": engine.get_persisted_candles(interval, min(max(limit, 1), 5000)),
+        "candles": await engine_call("get_persisted_candles", interval, min(max(limit, 1), 5000)),
     }
 
 
 @app.get("/api/history/option-chain")
 async def history_option_chain(limit: int = 200, _user: AuthUser = Depends(current_user)) -> dict:
     """Recent option chain/ATM snapshots read back from the persistence store."""
-    return {"snapshots": engine.get_persisted_option_chain_snapshots(min(max(limit, 1), 5000))}
+    return {"snapshots": await engine_call("get_persisted_option_chain_snapshots", min(max(limit, 1), 5000))}
 
 
 @app.get("/api/history/dates")
@@ -235,11 +355,11 @@ async def history_dates(_user: AuthUser = Depends(current_user)) -> dict:
     """Every Asia/Kolkata trading date with persisted data (newest first),
     plus today's IST date — backs the Date/Session selector's Previous/Next/
     date-picker navigation."""
-    return engine.get_available_trading_dates()
+    return await engine_call("get_available_trading_dates")
 
 
 @app.get("/api/history/session")
-def history_session(date: str, strike: float | None = None, user: AuthUser = Depends(current_user)) -> dict:
+async def history_session(date: str, strike: float | None = None, user: AuthUser = Depends(current_user)) -> dict:
     """
     Read-only bundle for one past Asia/Kolkata trading date: underlying price
     summary, candles (every configured interval), option chain snapshots
@@ -251,10 +371,10 @@ def history_session(date: str, strike: float | None = None, user: AuthUser = Dep
         datetime.strptime(date, "%Y-%m-%d")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="date must be in YYYY-MM-DD format.") from exc
-    data = engine.get_historical_session(date, strike)
+    data = await engine_call("get_historical_session", date, strike)
     if auth_settings.auth_required():
         # The engine's own paper section is global; replace it with this user's trades.
-        trades = get_paper_service().trades_for_date(user.id, date)
+        trades = await asyncio.to_thread(get_paper_service().trades_for_date, user.id, date)
         data["paper_trading"] = summarize_persisted_paper_trades(trades)
     return data
 
@@ -268,11 +388,11 @@ async def straddle_candles(strike: float, date: str | None = None, _user: AuthUs
     trading session (read-only, no live ticks). 404 if that strike has no
     data yet/for that date."""
     if date is not None:
-        data = engine.get_persisted_strike_candles_for_date(strike, date)
+        data = await engine_call("get_persisted_strike_candles_for_date", strike, date)
         if data is None:
             raise HTTPException(status_code=404, detail=f"No candle data for strike {strike} on {date}")
         return data
-    data = engine.get_strike_straddle_candles(strike)
+    data = await engine_call("get_strike_straddle_candles", strike)
     if data is None:
         raise HTTPException(status_code=404, detail=f"No candle data yet for strike {strike}")
     return data
@@ -392,19 +512,19 @@ def paper_config(req: PaperConfigRequest, user: AuthUser = Depends(current_user)
 @app.get("/api/logs")
 async def logs(limit: int = 200, level: str | None = None, _admin: AuthUser = Depends(require_admin)) -> dict:
     """Recent structured log entries (in-memory ring buffer), newest first."""
-    return {"logs": engine.get_recent_logs(min(max(limit, 1), 1000), level)}
+    return {"logs": await engine_call("get_recent_logs", min(max(limit, 1), 1000), level)}
 
 
 @app.get("/api/settings")
 async def get_settings(_user: AuthUser = Depends(current_user)) -> dict:
     """Current runtime-adjustable settings (data source, ATM method, TP/SL, etc.)."""
-    return engine.get_settings()
+    return await engine_call("get_settings")
 
 
 @app.post("/api/settings/atm")
 async def set_atm_settings(req: ATMConfigRequest, _admin: AuthUser = Depends(require_admin)) -> dict:
     try:
-        return engine.set_atm_config(req.atm_method, req.delta_threshold)
+        return await engine_call("set_atm_config", req.atm_method, req.delta_threshold)
     except ValueError as exc:
         raise _bad_request(exc) from exc
 
@@ -412,7 +532,7 @@ async def set_atm_settings(req: ATMConfigRequest, _admin: AuthUser = Depends(req
 @app.post("/api/settings/candle-basis")
 async def set_candle_basis(req: CandleBasisRequest, _admin: AuthUser = Depends(require_admin)) -> dict:
     try:
-        return engine.set_candle_price_basis(req.candle_price_basis)
+        return await engine_call("set_candle_price_basis", req.candle_price_basis)
     except ValueError as exc:
         raise _bad_request(exc) from exc
 
@@ -425,7 +545,7 @@ async def set_data_source(req: DataSourceRequest, _admin: AuthUser = Depends(req
     live provider behind the same pipeline.
     """
     try:
-        return engine.reconfigure_source(req.data_source, req.sequence, req.speed)
+        return await engine_call("reconfigure_source", req.data_source, req.sequence, req.speed)
     except ValueError as exc:
         raise _bad_request(exc) from exc
 
@@ -440,6 +560,174 @@ async def _close_ws(websocket: WebSocket, code: int, reason: str) -> None:
         pass
 
 
+def _token_claims(token: object) -> tuple[str, float]:
+    """(user id, expiry as epoch seconds) of a valid access token; AuthError otherwise."""
+    if not isinstance(token, str):
+        raise AuthError("not_authenticated", "Expected an auth frame.")
+    claims = decode_access_token(token)
+    return claims["sub"], float(claims["exp"])
+
+
+async def _ws_authenticate(websocket: WebSocket) -> tuple[str, float] | None:
+    """Read the first frame, expect {"type":"auth","token":...}, return (user id, token expiry).
+    Closes the socket (4401) and returns None on any failure. Nothing is ever sent
+    to an unauthenticated socket, and tokens are never accepted in the URL."""
+    try:
+        raw = await asyncio.wait_for(websocket.receive_text(), timeout=WS_AUTH_TIMEOUT_SECONDS)
+        if len(raw) > WS_MAX_MESSAGE_BYTES:
+            raise AuthError("invalid_token", "Auth frame too large.")
+        frame = json.loads(raw)
+        if not isinstance(frame, dict) or frame.get("type") != "auth":
+            raise AuthError("not_authenticated", "Expected an auth frame.")
+        return _token_claims(frame.get("token"))
+    except (asyncio.TimeoutError, json.JSONDecodeError, AuthError, WebSocketDisconnect):
+        await _close_ws(websocket, rt_protocol.CLOSE_AUTH, "authentication failed")
+        return None
+
+
+class _TokenBucket:
+    """Per-connection inbound rate limit (a client has no reason to send many frames)."""
+
+    def __init__(self, rate: float = 10.0, burst: float = 30.0):
+        self.rate, self.burst, self.tokens, self.stamp = rate, burst, burst, time.monotonic()
+
+    def allow(self) -> bool:
+        now = time.monotonic()
+        self.tokens = min(self.burst, self.tokens + (now - self.stamp) * self.rate)
+        self.stamp = now
+        if self.tokens >= 1:
+            self.tokens -= 1
+            return True
+        return False
+
+
+@app.websocket("/ws/v1")
+async def websocket_v1(websocket: WebSocket) -> None:
+    """Topic-based live feed (see src/realtime/protocol.py).
+
+    The client subscribes to exactly the topics its page shows and receives a snapshot per
+    topic, then patches. Auth is the same first-frame handshake as /ws."""
+    await websocket.accept()
+    user_id: str | None = None
+    token_expiry: float | None = None
+    if auth_settings.auth_required():
+        authenticated = await _ws_authenticate(websocket)
+        if authenticated is None:
+            return
+        user_id, token_expiry = authenticated
+    rt_hub.max_clients = auth_settings.max_ws_connections_total()
+    rt_hub.max_clients_per_user = auth_settings.max_ws_connections_per_user()
+    rejected = rt_hub.admit(user_id)
+    if rejected is not None:
+        await _close_ws(websocket, rt_protocol.CLOSE_CAPACITY, rejected)
+        return
+
+    async def close(code: int, reason: str) -> None:
+        await _close_ws(websocket, code, reason)
+
+    session = rt_hub.add_client(websocket.send_text, close, user_id)
+    session.queue_control(
+        rt_protocol.control_message("hello", heartbeat_s=hub_module.HEARTBEAT_SECONDS, max_topics=hub_module.MAX_TOPICS_PER_CLIENT)
+    )
+    loop = asyncio.get_running_loop()
+    expiry_timer: asyncio.TimerHandle | None = None
+
+    def arm_expiry(expires_at: float) -> None:
+        """Close this socket the moment its access token expires, unless it is renewed."""
+        nonlocal expiry_timer
+        if expiry_timer is not None:
+            expiry_timer.cancel()
+        expiry_timer = loop.call_later(
+            max(0.0, expires_at - time.time()), session.kill, "token_expired", rt_protocol.CLOSE_AUTH
+        )
+
+    if token_expiry is not None:
+        arm_expiry(token_expiry)
+    bucket, strikes = _TokenBucket(), 0
+    try:
+        while not session.closed:
+            raw = await websocket.receive_text()
+            if len(raw) > WS_MAX_MESSAGE_BYTES:
+                rt_metrics.inbound_rejected.labels("too_large").inc()
+                session.kill("message_too_large", code=1009)
+                return
+            if not bucket.allow():
+                strikes += 1
+                rt_metrics.inbound_rejected.labels("rate_limited").inc()
+                session.queue_control(rt_protocol.control_message("rate_limited", retry_after_s=1))
+                if strikes > 50:
+                    session.kill("rate_limit_abuse", code=rt_protocol.CLOSE_PROTOCOL)
+                    return
+                continue
+            try:
+                frame = json.loads(raw)
+            except json.JSONDecodeError:
+                session.queue_control(rt_protocol.error_message("bad_json", "Frame is not valid JSON."))
+                continue
+            if isinstance(frame, dict) and frame.get("type") == "auth":
+                # In-band renewal: a fresh token for the SAME user replaces the expiring one.
+                if token_expiry is None:  # auth is off, so there is nothing to renew
+                    session.queue_control(rt_protocol.control_message("auth_ok", exp=None))
+                    continue
+                try:
+                    new_user, token_expiry = _token_claims(frame.get("token"))
+                    if new_user != user_id:
+                        raise AuthError("invalid_token", "Token belongs to a different user.")
+                except AuthError:
+                    session.kill("auth_renewal_failed", code=rt_protocol.CLOSE_AUTH)
+                    return
+                arm_expiry(token_expiry)
+                session.queue_control(rt_protocol.control_message("auth_ok", exp=int(token_expiry * 1000)))
+                continue
+            _handle_client_frame(session, frame)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        if expiry_timer is not None:
+            expiry_timer.cancel()
+        await session.shutdown()
+
+
+def _handle_client_frame(session, frame: object) -> None:
+    if not isinstance(frame, dict):
+        session.queue_control(rt_protocol.error_message("bad_frame", "Frame must be a JSON object."))
+        return
+    kind = frame.get("type")
+    if kind in ("subscribe", "unsubscribe"):
+        valid, errors = validate_topics(frame.get("topics"))
+        for topic, message in errors:
+            session.queue_control(rt_protocol.error_message("bad_topic", message, topic or None))
+        if kind == "subscribe":
+            done = session.subscribe(valid)
+            session.queue_control(rt_protocol.control_message("subscribed", topics=done))
+        else:
+            done = session.unsubscribe(valid)
+            session.queue_control(rt_protocol.control_message("unsubscribed", topics=done))
+    elif kind == "resync":
+        topic = frame.get("topic")
+        if not isinstance(topic, str) or not session.request_resync(topic):
+            session.queue_control(rt_protocol.error_message("not_subscribed", "Subscribe before requesting a resync.", str(topic)[:40]))
+    elif kind == "ping":
+        session.queue_control(rt_protocol.control_message("pong", t=int(time.time() * 1000)))
+    else:
+        session.queue_control(rt_protocol.error_message("unknown_type", "Unknown frame type."))
+
+
+@app.get("/metrics")
+def metrics_endpoint(request: Request) -> Response:
+    """Prometheus metrics. With METRICS_TOKEN set, requires `Authorization: Bearer <token>`.
+    Without it the endpoint is open only when AUTH_MODE=disabled (local development) and
+    does not exist otherwise: operational metrics must not be world-readable."""
+    expected = os.getenv("METRICS_TOKEN")
+    if expected:
+        supplied = request.headers.get("authorization", "").partition(" ")[2]
+        if not hmac.compare_digest(supplied.encode(), expected.encode()):
+            raise HTTPException(status_code=401, detail="Invalid metrics token.", headers={"WWW-Authenticate": "Bearer"})
+    elif auth_settings.auth_required():
+        raise HTTPException(status_code=404, detail="Not found")
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
     """Live snapshots.
@@ -450,19 +738,15 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     and access logs would record them. Nothing is sent before authentication succeeds.
     """
     await websocket.accept()
+    if rt_settings.is_gateway():
+        await _close_ws(websocket, 1008, "use /ws/v1")  # the single-blob stream exists only where the engine runs
+        return
     user_id: str | None = None
     if auth_settings.auth_required():
-        try:
-            raw = await asyncio.wait_for(websocket.receive_text(), timeout=WS_AUTH_TIMEOUT_SECONDS)
-            if len(raw) > WS_MAX_MESSAGE_BYTES:
-                raise AuthError("invalid_token", "Auth frame too large.")
-            frame = json.loads(raw)
-            if not isinstance(frame, dict) or frame.get("type") != "auth" or not isinstance(frame.get("token"), str):
-                raise AuthError("not_authenticated", "Expected an auth frame.")
-            user_id = authenticate_token(frame["token"]).id
-        except (asyncio.TimeoutError, json.JSONDecodeError, AuthError, WebSocketDisconnect):
-            await _close_ws(websocket, 4401, "authentication failed")
+        authenticated = await _ws_authenticate(websocket)
+        if authenticated is None:
             return
+        user_id = authenticated[0]  # the legacy /ws predates token expiry handling; /ws/v1 enforces it
         if len(_ws_clients) >= auth_settings.max_ws_connections_total():
             await _close_ws(websocket, 4429, "server at capacity")
             return
@@ -529,7 +813,7 @@ async def security_headers_and_frontend_cache(request: Request, call_next):
     existing ETag/Last-Modified (still enables a cheap 304) but require the
     browser to ask every time rather than trusting a heuristic window.
     """
-    if not IS_SERVERLESS and not engine.is_running:
+    if not IS_SERVERLESS and not rt_settings.is_gateway() and not engine.is_running:
         _ensure_engine_running()
     response = await call_next(request)
     response.headers.setdefault("X-Content-Type-Options", "nosniff")

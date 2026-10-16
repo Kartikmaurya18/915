@@ -1,4 +1,6 @@
-# Operations guide (Phase 1)
+# Operations guide
+
+Topology, protocol and failure behaviour of the live feed are in [REALTIME.md](REALTIME.md).
 
 What is verified and what is not is stated explicitly. "Verified" means it was run
 against a local PostgreSQL 16 container, **not** against a cloud provider.
@@ -13,6 +15,11 @@ against a local PostgreSQL 16 container, **not** against a cloud provider.
 | `DATABASE_URL` | SQLAlchemy URL. `postgres://` and `postgresql://` are accepted. Use `?sslmode=require` for managed providers. |
 | `DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_STATEMENT_TIMEOUT_MS` | Pool and per-statement timeout (PostgreSQL). |
 | `CORS_ORIGINS` | Comma-separated allow-list. Empty = same-origin only. |
+| `REALTIME_MODE` | `embedded` (default: one process owns the engine and serves clients) or `gateway` (serves clients only; data comes from Redis; requires `AUTH_MODE=required`). The ingestor is the separate `python -m src.ingestor` entrypoint. |
+| `REDIS_URL`, `RT_PREFIX` | Redis for the live feed, the ingestor lease and the control channel. `RT_PREFIX` namespaces the keys (default `rt:`). Redis must be private and password-protected: the control channel trusts whoever can write to it. |
+| `INGESTOR_ID`, `INGESTOR_LEASE_TTL_MS`, `INGESTOR_METRICS_PORT` | Ingestor identity, lease length (failover takes about one TTL after a crash) and its metrics port. |
+| `METRICS_TOKEN` | Bearer token for `/metrics`. Without it `/metrics` does not exist when auth is on. |
+| `WS_MAX_CONNECTIONS_PER_USER`, `WS_MAX_CONNECTIONS_TOTAL` | Per-account and per-process WebSocket caps. |
 | `TRUSTED_PROXY_HOPS` | Reverse proxies in front of the app. `0` ignores `X-Forwarded-For` (rate limits then see the proxy's IP, so set this correctly behind a load balancer). |
 
 Secrets come from the environment or a secret manager. `.env` is git-ignored and must never be committed.
@@ -77,19 +84,31 @@ a normal login.
   until it expires; refresh is refused immediately.
 - Two browser tabs refreshing at the same instant can sign the user out (the loser looks like a replay). The SPA
   must serialise refreshes (single-flight / `BroadcastChannel`).
-- WebSocket: first frame must be `{"type":"auth","token":...}` within 5 s; nothing is sent before it. An open
-  socket is **not** closed when its access token expires (Phase 2: in-band token renewal).
-- Rate limits (login, registration) are **in-process**: with N replicas the effective limit is N times higher.
-  Moves to Redis in Phase 2.
+- WebSocket: the first frame must be `{"type":"auth","token":...}` within 5 s; nothing is sent before it. On `/ws/v1` the
+  socket is closed (4401) when its access token expires unless the client sends a fresh `auth` frame for the same
+  user first (in-band renewal). The legacy `/ws` (embedded mode only) does not enforce token expiry on open sockets.
+- Rate limits (login, registration) are **in-process**: with N gateway replicas the effective limit is N times higher.
+  Not yet moved to Redis.
 - Request bodies over 64 KiB are rejected by `Content-Length`; a reverse proxy should enforce the same for
   chunked uploads.
 
-## Known Phase 1 limits
+## Database behaviour under concurrency
 
-- Per-user books are cached **in each process**, and TP/SL exits are written from the tick thread. Run a
-  **single app instance** until Phase 2 moves the engine into a dedicated ingestor and makes the gateway stateless.
-- Market history (candles, option-chain snapshots) still uses the local SQLite file, which is **not durable** on an
-  ephemeral container disk. User data (accounts, positions, trades, settings, audit) is in PostgreSQL.
-- Paper P&L uses floating point, matching the existing simulation; fine for paper trading, not for real money.
-- The old `paper_trades` rows in a local SQLite file are global (no owner) and are not imported; there is no
+* Mutating auth operations run through `run_in_transaction`, which retries the whole transaction when
+  PostgreSQL picks it as a deadlock victim or reports a serialization failure (`db_transaction_retries_total`).
+  Revoking a session family takes its row locks in a fixed order first, which is what makes concurrent
+  revocations (every loser of a refresh race runs one) deadlock-free in the common case.
+* Closing a paper position is a conditional `UPDATE ... WHERE status = 'OPEN'`; a manual close and the
+  exit worker racing each other have exactly one winner.
+* Statements are cancelled after `DB_STATEMENT_TIMEOUT_MS` (default 10 s). A request that waits that long
+  for a lock fails with an error instead of holding a pooled connection indefinitely.
+
+## Known limits
+
+* Market history (candles, option-chain snapshots) still uses SQLite on the **ingestor's** disk, which is not
+  durable on an ephemeral container disk. In `gateway` mode it is reached through the control channel (so it
+  is served only while an ingestor leads). Moving it to PostgreSQL is the remaining persistence work.
+* In-progress candle state is held by the leading ingestor; a failover restarts the current candle.
+* Paper P&L uses floating point, matching the existing simulation; fine for paper trading, not for real money.
+* The old `paper_trades` rows in a local SQLite file are global (no owner) and are not imported; there is no
   per-user mapping for them.
