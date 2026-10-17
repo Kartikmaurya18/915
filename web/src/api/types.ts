@@ -72,8 +72,24 @@ export interface StrikeRow {
   put_volume: number | null;
   call_delta: number | null;
   put_delta: number | null;
+  /** Implied volatility in percentage points (14.2 = 14.2 %). */
   call_iv: number | null;
   put_iv: number | null;
+  call_bid: number | null;
+  call_ask: number | null;
+  put_bid: number | null;
+  put_ask: number | null;
+  call_gamma: number | null;
+  put_gamma: number | null;
+  /** Per calendar day. */
+  call_theta: number | null;
+  put_theta: number | null;
+  /** Per 1 volatility point. */
+  call_vega: number | null;
+  put_vega: number | null;
+  /** Open interest change since the previous session's close; null when the provider sends no baseline. */
+  call_oi_change: number | null;
+  put_oi_change: number | null;
   combined_value: number | null;
   is_atm: boolean;
 }
@@ -85,6 +101,8 @@ export interface OptionsTopic {
   expiry: string;
   expiries: string[];
   provider: string;
+  /** "provider", "calculated" or "provider+calculated": where the Greeks and IV came from. */
+  greeks_source?: string | null;
   timestamp: string;
   strikes: StrikeRow[];
 }

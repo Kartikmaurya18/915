@@ -1,4 +1,4 @@
-import { Activity, BarChart3, History, LayoutDashboard, ScrollText, Settings, ShieldCheck, WalletCards, type LucideIcon } from "lucide-react";
+import { Activity, BarChart3, Layers, History, LayoutDashboard, ScrollText, Settings, ShieldCheck, WalletCards, type LucideIcon } from "lucide-react";
 
 export interface NavItem {
   to: string;
@@ -14,9 +14,10 @@ export interface NavItem {
 export const NAV: NavItem[] = [
   { to: "/", label: "Overview", short: "Home", icon: LayoutDashboard, primary: true },
   { to: "/trading", label: "Paper Trading", short: "Trade", icon: WalletCards, primary: true },
+  { to: "/strategy", label: "Strategy", short: "Strategy", icon: Layers, primary: true },
   { to: "/history", label: "History", short: "History", icon: History, primary: true },
   { to: "/rrg", label: "RRG", short: "RRG", icon: BarChart3, primary: true },
-  { to: "/quality", label: "Data Quality", short: "Quality", icon: Activity, primary: true },
+  { to: "/quality", label: "Data Quality", short: "Quality", icon: Activity },
   { to: "/logs", label: "Logs", short: "Logs", icon: ScrollText, admin: true },
   { to: "/settings", label: "Settings", short: "Settings", icon: Settings, admin: true },
 ];

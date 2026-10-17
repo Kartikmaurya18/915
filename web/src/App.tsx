@@ -10,6 +10,7 @@ import { AuthPage } from "./pages/AuthPage";
 // Route-level code splitting: the chart library only loads with the Overview page.
 const Overview = lazy(() => import("./pages/Overview"));
 const Trading = lazy(() => import("./pages/Trading"));
+const Strategy = lazy(() => import("./pages/Strategy"));
 const History = lazy(() => import("./pages/History"));
 const Rrg = lazy(() => import("./pages/Rrg"));
 const Quality = lazy(() => import("./pages/Quality"));
@@ -39,6 +40,7 @@ export function App() {
             <Route element={<Layout />}>
               <Route index element={<Overview />} />
               <Route path="trading" element={<Trading />} />
+              <Route path="strategy" element={<Strategy />} />
               <Route path="history" element={<History />} />
               <Route path="rrg" element={<Rrg />} />
               <Route path="quality" element={<Quality />} />
