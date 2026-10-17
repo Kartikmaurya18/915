@@ -973,15 +973,33 @@ class MarketEngine:
             "execution_mode": self._execution.mode,
         }
 
+        now = now_ist(self.cfg.get("timezone", "Asia/Kolkata"))  # one clock for everything in this snapshot
         last_tick_age_seconds, is_stale = compute_staleness(
             self._latest_tick.timestamp if self._latest_tick else None,
+            now=now,
             threshold_seconds=self.stale_threshold_seconds,
         )
+
+        # The session is judged by the wall clock for a real feed: after 15:30 it stops ticking, and "the session of
+        # the last tick" would keep saying OPEN. A simulated feed ticks around the clock by design, so it keeps the
+        # session of its latest tick.
+        if source.is_simulated:
+            market_session = self._latest_market_session
+        else:
+            market_session = get_market_session_status(
+                now, session_start=self.session_start, session_end=self.session_end, timezone=self.cfg.get("timezone", "Asia/Kolkata")
+            )
+            if market_session != "OPEN":
+                is_stale = False  # a closed market is not a broken feed; the session field says why nothing moves
+        chain_age_seconds = (now - to_ist(self._latest_chain.timestamp)).total_seconds() if self._latest_chain else None
+        expires = source.credentials_expire_at()
+        provider_info["credentials_expire_at"] = to_ist(expires).isoformat() if expires else None
 
         return serialize_snapshot(
             duplicate_tick_count=self._duplicate_tick_count,
             rejected_tick_count=self._rejected_tick_count,
-            market_session=self._latest_market_session,
+            market_session=market_session,
+            chain_age_seconds=chain_age_seconds,
             underlying=self.underlying,
             tick=self._latest_tick,
             atm=self._latest_atm,

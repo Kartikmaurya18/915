@@ -37,6 +37,10 @@ export interface DataQuality {
   duplicate_tick_count: number;
   rejected_tick_count: number;
   market_session: string;
+  /** Age of the option chain's prices, separate from the index tick. */
+  chain_age_seconds?: number | null;
+  /** Judged by the wall clock for a real feed. */
+  market_open?: boolean;
 }
 
 export interface ProviderInfo {
@@ -45,6 +49,8 @@ export interface ProviderInfo {
   status_detail: string | null;
   is_simulated: boolean;
   underlying: string;
+  /** When the provider's access token stops working (ISO), if known. */
+  credentials_expire_at?: string | null;
 }
 
 /** `index:<UNDERLYING>` */

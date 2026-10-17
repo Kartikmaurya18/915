@@ -95,7 +95,8 @@ def test_sensex_mock_uses_bse_and_100_point_strikes():
     assert strikes == sorted(strikes) and strikes[1] - strikes[0] == 100
     # With calculated Greeks, ATM-by-delta finds the strike nearest 0.50 on a non-NIFTY chain.
     atm = find_atm_strike_delta(build_greeks_engine("calculated").enrich(chain), 0.5)
-    assert abs(atm.strike - chain.underlying_ltp) <= 100
+    # Delta-ATM sits near the forward (spot plus carry, ~60 points on SENSEX), not exactly at spot, so allow two steps.
+    assert abs(atm.strike - chain.underlying_ltp) <= 200
 
 
 def test_replay_provider_is_simulated_and_normalized():
@@ -231,7 +232,14 @@ def test_dhan_rejects_unmapped_underlying(monkeypatch):
     monkeypatch.setenv("DHAN_ACCESS_TOKEN", "test_token_abc")
     with patch("src.data_sources.dhan.dhanhq"):
         with pytest.raises(ValueError, match="No Dhan security id"):
-            DhanMarketDataProvider(underlying="FINNIFTY")
+            DhanMarketDataProvider(underlying="BANKEX")  # an index Dhan's id table does not map
+
+
+def test_dhan_finnifty_is_mapped_to_the_id_in_dhans_instrument_master(monkeypatch):
+    monkeypatch.setenv("DHAN_CLIENT_ID", "test_client_123")
+    monkeypatch.setenv("DHAN_ACCESS_TOKEN", "test_token_abc")
+    with patch("src.data_sources.dhan.dhanhq"):
+        assert DhanMarketDataProvider(underlying="FINNIFTY").security_id == 27
 
 
 def test_dhan_sensex_uses_its_own_security_id(monkeypatch):

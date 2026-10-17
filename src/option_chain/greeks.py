@@ -42,6 +42,11 @@ class ProviderGreeksEngine(GreeksEngine):
         return chain
 
 
+# Decimal places kept, chosen to be finer than anything the screen shows. Beyond that the extra digits are noise
+# that changes on every tick, which would put every strike in every patch and inflate what each client downloads.
+PRECISION = {"iv": 2, "delta": 4, "gamma": 6, "theta": 2, "vega": 2}
+
+
 class CalculatedGreeksEngine(GreeksEngine):
     """Black-Scholes IV and Greeks for whatever the provider did not send."""
 
@@ -83,13 +88,13 @@ class CalculatedGreeksEngine(GreeksEngine):
             if strike_iv is None:
                 return 0
             iv = strike_iv
-            setattr(leg, f"{side}_iv", round(iv, 3))
+            setattr(leg, f"{side}_iv", round(iv, PRECISION["iv"]))
             filled += 1
         wanted = [f for f in ("delta", "gamma", "theta", "vega") if getattr(leg, f"{side}_{f}") is None]
         if wanted:
             g = analytics.greeks(opt, chain.underlying_ltp, leg.strike, t, self.risk_free_rate, q, iv / 100.0)
             for field in wanted:
-                setattr(leg, f"{side}_{field}", round(getattr(g, field), 6))
+                setattr(leg, f"{side}_{field}", round(getattr(g, field), PRECISION[field]))
                 filled += 1
         return filled
 

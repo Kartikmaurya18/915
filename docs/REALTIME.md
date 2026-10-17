@@ -26,10 +26,12 @@ Run **at least two ingestors** (one leads, the rest are warm standbys) and as ma
 
 | Topic | Contents |
 |---|---|
-| `index:NIFTY` | price, ATM, calculated prices, provider/status, data-quality and staleness |
-| `options:NIFTY` | the option chain |
+| `index:NIFTY` | price, ATM, calculated prices, provider/status (with `credentials_expire_at`), data quality: tick age, `chain_age_seconds`, `market_session`, `market_open`, staleness |
+| `options:NIFTY` | the option chain: per strike LTP, bid/ask, volume, OI and OI change, IV, Delta, Gamma, Theta, Vega (provider's, or calculated: see `greeks_source`) |
 | `candles:NIFTY:1m` / `5m` / `15m` | active candle, completed candles, series |
 | `rrg:NIFTY` | relative rotation graph (only when enabled) |
+
+Strangle candles are not a topic: they are fetched over REST (`GET /api/pair-candles?ce_strike=&pe_strike=`), because a pair exists only once someone asks for it.
 
 A client subscribes to exactly what its page shows. **No user's paper book is ever a topic**;
 per-user state is fetched over authenticated REST.

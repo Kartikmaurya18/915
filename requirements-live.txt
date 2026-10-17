@@ -1,0 +1,5 @@
+# Optional: only needed to use REAL market data (LIVE_DATA_ENABLED=true). Mock and replay need none of this.
+#   pip install -r requirements-live.txt
+# Pinned to 2.0.2 on purpose: 2.1+ changed the client constructor and removed marketfeed.DhanFeed, which
+# src/data_sources/dhan.py uses. Verified by inspecting both releases (2.0.2 matches; 2.3.0 does not).
+dhanhq==2.0.2

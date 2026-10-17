@@ -303,6 +303,7 @@ def serialize_snapshot(
     duplicate_tick_count: int = 0,
     rejected_tick_count: int = 0,
     market_session: str | None = None,
+    chain_age_seconds: float | None = None,
     settings: dict | None = None,
     provider: dict | None = None,
 ) -> dict:
@@ -351,6 +352,10 @@ def serialize_snapshot(
             "duplicate_tick_count": duplicate_tick_count,
             "rejected_tick_count": rejected_tick_count,
             "market_session": market_session,
+            # How old the option chain's prices are. Separate from the index tick above: a feed can keep ticking the
+            # index while the chain behind it has stopped refreshing, and each must be able to warn on its own.
+            "chain_age_seconds": round(chain_age_seconds, 1) if chain_age_seconds is not None else None,
+            "market_open": market_session == "OPEN",
         },
         "atm": serialize_atm(atm),
         "option_chain": serialize_chain(chain, atm_strike),

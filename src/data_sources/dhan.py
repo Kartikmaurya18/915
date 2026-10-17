@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import os
 import queue
 import threading
 import time
 from datetime import datetime
 from typing import Optional
+
+try:
+    import websockets
+except ImportError:  # dhanhq depends on it; without it the except clauses below must still be evaluable
+    websockets = None
 
 try:
     from dhanhq import dhanhq
@@ -19,7 +26,7 @@ from src.data_sources.base import DataSource, ProviderStatus
 from src.instruments import get_underlying_spec
 from src.models import OptionChainSnapshot, PriceTick
 from src.logging import get_logger
-from src.timeutil import now_ist
+from src.timeutil import IST, now_ist
 
 
 from pathlib import Path
@@ -61,6 +68,7 @@ def _ensure_env_loaded() -> None:
 DHAN_UNDERLYING_IDS: dict[str, int] = {
     "NIFTY": 13,
     "BANKNIFTY": 25,
+    "FINNIFTY": 27,
     "SENSEX": 51,
 }
 
@@ -93,6 +101,46 @@ def _opt_float(value):
         return None
 
 
+def token_expiry(token: str | None) -> datetime | None:
+    """When a Dhan access token expires, read from its `exp` claim (the token is a JWT). Best effort: None for a
+    token that is not a JWT or has no `exp`. The signature is NOT verified; this only reads a date for warnings."""
+    try:
+        parts = (token or "").split(".")
+        if len(parts) != 3:
+            return None
+        payload = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+        exp = payload.get("exp")
+        return datetime.fromtimestamp(float(exp), tz=IST) if exp is not None else None
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return None
+
+
+# Dhan's documented Data API error codes (https://dhanhq.co/docs/v2/annexure/).
+_DHAN_ERRORS = (
+    ("805", "Dhan rate limit hit (805): too many requests. Further requests may get the account blocked"),
+    ("806", "Dhan Data APIs not subscribed (806): enable Data API access in your DhanHQ account"),
+    ("807", "Dhan access token has expired (807): generate a new token and restart the ingestor"),
+    ("808", "Dhan authentication failed (808): client id or access token invalid"),
+    ("809", "Dhan access token is invalid (809): generate a new token and restart the ingestor"),
+    ("810", "Dhan client id is invalid (810)"),
+)
+
+
+def explain_dhan_error(text: str) -> str | None:
+    """A clear, credential-free message for a known Dhan error code or phrase in an API failure body."""
+    lowered = text.lower()
+    for code, message in _DHAN_ERRORS:
+        if code in text:
+            return message
+    if "expired" in lowered:
+        return _DHAN_ERRORS[2][1]
+    if "authentication failed" in lowered:
+        return _DHAN_ERRORS[3][1]
+    if "not subscribed" in lowered:
+        return _DHAN_ERRORS[1][1]
+    return None
+
+
 class DhanMarketDataProvider(DataSource):
     """
     Live market data provider using DhanHQ API v2.0.2.
@@ -113,12 +161,18 @@ class DhanMarketDataProvider(DataSource):
     NIFTY_SEGMENT = "IDX_I"
     NIFTY_SEGMENT_NUM = IDX  # 0 for IDX
 
-    OPTION_CHAIN_RATE_LIMIT = 3.0  # seconds between REST requests
+    OPTION_CHAIN_RATE_LIMIT = 3.0  # seconds between REST requests (Dhan allows one option-chain call per 3 s)
+    MAX_CACHED_CHAIN_AGE = 15.0  # a cached chain older than this is never re-served after a failed refresh
 
     def __init__(self, underlying: str = "NIFTY", poll_interval: float = 5.0):
         self.underlying = underlying.upper()
         self.poll_interval = poll_interval
         self._logger = get_logger("INFO")
+        if dhanhq is None:
+            raise ImportError(
+                "The 'dhanhq' package is missing or an incompatible version. Install the pinned one: "
+                "pip install -r requirements-live.txt   (dhanhq==2.0.2; 2.1 and later changed the API this code uses)"
+            )
         if self.underlying not in DHAN_UNDERLYING_IDS:
             raise ValueError(
                 f"No Dhan security id mapped for underlying {self.underlying!r}. "
@@ -128,7 +182,9 @@ class DhanMarketDataProvider(DataSource):
         self.segment = "IDX_I"
         self.exchange = get_underlying_spec(self.underlying).exchange
         self._last_error: str | None = None
+        self._ws_error: str | None = None  # the live feed's own problem; independent of the REST chain's
         self._disconnected = False
+        self._token_expires_at: datetime | None = None
 
         # Ensure .env file is loaded before reading environment variables
         _ensure_env_loaded()
@@ -159,6 +215,9 @@ class DhanMarketDataProvider(DataSource):
             )
 
         self.client_id_masked = self._mask_client_id(self._client_id)
+        self._token_expires_at = token_expiry(self._access_token)
+        if self._token_expires_at is not None and self._token_expires_at <= now_ist():
+            raise ValueError(f"DHAN_ACCESS_TOKEN expired at {self._token_expires_at:%Y-%m-%d %H:%M} IST: generate a new token")
 
         # State tracking
         self._is_authenticated = False
@@ -201,6 +260,9 @@ class DhanMarketDataProvider(DataSource):
                 "dhan_auth_success",
                 {"client_id": self.client_id_masked, "status": "authenticated"}
             )
+        except TypeError as e:  # the constructor changed after dhanhq 2.0.x
+            self._is_authenticated = False
+            raise ImportError("The installed dhanhq is an incompatible version. Install dhanhq==2.0.2 (requirements-live.txt).") from e
         except Exception as e:
             self._is_authenticated = False
             self._last_error = "Dhan authentication failed"
@@ -283,11 +345,16 @@ class DhanMarketDataProvider(DataSource):
             return normalized
 
         except Exception as e:
-            self._last_error = f"Dhan option chain fetch failed: {e.__class__.__name__}"
+            explained = explain_dhan_error(str(e))
+            self._last_error = explained or f"Dhan option chain fetch failed: {e.__class__.__name__}"
             self._logger.log_error(e, {"context": "dhan_option_chain_fetch"})
-            if self._last_chain:
+            # A recent chain may bridge a one-off failure. An old one must not: showing minutes-old prices as if
+            # they were current is worse than showing none, and the engine keeps the last chain with its own
+            # (old) timestamp, so the UI can say exactly how old it is.
+            max_age = max(self.MAX_CACHED_CHAIN_AGE, self.poll_interval * 3)
+            if self._last_chain and time.time() - self._last_chain_fetch_time <= max_age and not explained:
                 return self._last_chain
-            raise ConnectionError(f"Dhan option chain fetch failed: {e}") from e
+            raise ConnectionError(self._last_error) from e
 
     @staticmethod
     def _normalize_leg(leg: dict) -> dict:
@@ -319,8 +386,9 @@ class DhanMarketDataProvider(DataSource):
         """
         try:
             if isinstance(dhan_response, dict) and dhan_response.get("status") == "failure":
+                # Keep both: Dhan puts the error code in either field, and explain_dhan_error() needs to see it.
                 raise ValueError(
-                    f"Dhan API option chain failed: {dhan_response.get('remarks') or dhan_response.get('data')}"
+                    f"Dhan API option chain failed: {dhan_response.get('remarks')} {dhan_response.get('data')}"
                 )
 
             data = _unwrap_dhan(dhan_response)
@@ -366,16 +434,21 @@ class DhanMarketDataProvider(DataSource):
         return list(self._expiries)
 
     def status(self) -> ProviderStatus:
+        if self._last_error:
+            return ProviderStatus.ERROR  # a failing chain is an error even while the index feed still ticks
         if self._has_received_tick and self._is_connected:
             return ProviderStatus.LIVE
-        if self._last_error:
+        if self._ws_error and not self._is_connected:
             return ProviderStatus.ERROR
         if self._disconnected:
             return ProviderStatus.DISCONNECTED
         return ProviderStatus.CONNECTING
 
     def status_detail(self) -> str | None:
-        return self._last_error
+        return self._last_error or (self._ws_error if not self._is_connected else None)
+
+    def credentials_expire_at(self) -> datetime | None:
+        return self._token_expires_at
 
     def get_underlying_ltp(self) -> float:
         """Return latest underlying LTP."""
@@ -404,6 +477,14 @@ class DhanMarketDataProvider(DataSource):
         while not self._stop_event.is_set():
             try:
                 tick = self._tick_queue.get(timeout=1.0)
+                # The engine's step (a rate-limited REST chain call, 3 s or more) is slower than the feed. Taking
+                # ticks one by one would fall further behind real time every second, so keep only the newest.
+                while tick is not None:
+                    try:
+                        newer = self._tick_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    tick = newer
                 if tick is None:
                     break
                 yield tick
@@ -458,6 +539,7 @@ class DhanMarketDataProvider(DataSource):
 
                 await self._feed.connect()
                 self._is_connected = True
+                self._ws_error = None
                 retry_delay = 2  # reset delay on successful connection
 
                 self._logger.log_system_event(
@@ -517,12 +599,11 @@ class DhanMarketDataProvider(DataSource):
                             except ValueError as ve:
                                 self._logger.log_error(ve, {"context": "dhan_tick_parse_value"})
 
-            except (websockets.exceptions.ConnectionClosed, websockets.exceptions.WebSocketException) as ws_err:
-                self._is_connected = False
-                self._logger.log_error(ws_err, {"context": "dhan_ws_connection_closed", "reconnect_in": retry_delay})
             except Exception as exc:
                 self._is_connected = False
-                self._logger.log_error(exc, {"context": "dhan_ws_error", "reconnect_in": retry_delay})
+                self._ws_error = explain_dhan_error(str(exc)) or f"Dhan live feed disconnected ({exc.__class__.__name__}); reconnecting"
+                closed = websockets is not None and isinstance(exc, (websockets.exceptions.ConnectionClosed, websockets.exceptions.WebSocketException))
+                self._logger.log_error(exc, {"context": "dhan_ws_connection_closed" if closed else "dhan_ws_error", "reconnect_in": retry_delay})
 
             if not self._stop_event.is_set():
                 await asyncio.sleep(retry_delay)

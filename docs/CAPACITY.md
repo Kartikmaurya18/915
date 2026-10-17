@@ -65,6 +65,40 @@ No client ever had to resync in any run.
 * One generator token was used for all clients (the per-user connection cap was raised for the test gateways only).
 * Not measured: more than two gateways, a real load balancer, TLS termination, real provider ticks.
 
+## What calculated Greeks cost (measured 2026-10-17, same machine)
+
+IV and Greeks are calculated on the server for every chain update (provider values win; the calculator fills gaps). Two measurements, both with the mock feed:
+
+**Compute, per tick, 11 strikes** (`scripts/bench_pipeline.py`, 1,500 ticks; one gateway-side process, no network):
+
+| Stage | p50 | p95 | p99 |
+|---|---|---|---|
+| Feed adapter: fetch and parse the chain | 0.48 ms | 0.94 ms | 1.5 ms |
+| **Greeks engine, calculated** (provider-only: 0.001 ms) | **0.80 ms** | **1.4 ms** | **2.0 ms** |
+| Whole engine step (fetch, Greeks, ATM, candles, paper, snapshot) | 2.2 ms | 4.0 ms | 5.5 ms |
+| Publisher: topic split and change detection | 0.04 ms | 0.07 ms | 0.12 ms |
+| Hub: patch and JSON encode (once per update, shared by every client) | 0.8 ms | 1.3 ms | 1.6 ms |
+
+So the Greeks add about 0.8 ms to a tick that has a budget of 250 ms to 5 s. Compute is not the cost.
+
+**Bandwidth is.** 500 clients, 4 updates a second, batching on, 30 s, same mock feed, differing only in `GREEKS_SOURCE`:
+
+| | provider values only | + calculated Greeks |
+|---|---|---|
+| Total egress | 50.6 Mbit/s | **73.2 Mbit/s (+45 %)** |
+| Per client | 12.3 KB/s | 17.9 KB/s |
+| Delivery latency p50 / p95 / p99 | 49 / 120 / 207 ms | 53 / 109 / 176 ms |
+| Errors, resyncs | 0, 0 | 0, 0 |
+| Options topic: snapshot / typical patch | about 5.8 KB / 3.2 KB | about 6.1 KB / 5.2 KB |
+
+Why the patch grows: every Greek depends on the underlying's price, so when spot moves they all move, and a chain patch becomes nearly a full snapshot.
+Rounding to display precision recovered about 5 %. Latency did not degrade (the small differences are within run-to-run noise on a shared machine);
+the clients' mirrored state matched the server's throughout (25 verified clients per run).
+
+Levers if egress matters more than convenience, in order of effort: raise `POLL_INTERVAL_SECONDS` (a real provider refreshes the chain every 3 s or more
+anyway, so the 4-per-second mock is the pessimistic case); move Greeks to a separate topic only subscribed by pages that show them; or send them at a
+lower rate than prices. None was needed at these numbers.
+
 ## Reproduce
 
 ```bash

@@ -11,11 +11,15 @@ one entry to PROVIDERS below.
 
 from __future__ import annotations
 
+import logging
+import os
 from typing import Callable
 
 from src.data_sources.base import DataSource, ProviderStatus
 from src.data_sources.mock import MockDataSource
 from src.data_sources.replay import DEFAULT_SEQUENCE, ReplayDataSource
+
+log = logging.getLogger("market_data.registry")
 
 
 def _mock(cfg: dict, underlying: str, poll: float) -> DataSource:
@@ -38,17 +42,41 @@ def _replay(cfg: dict, underlying: str, poll: float) -> DataSource:
     )
 
 
+def live_data_enabled() -> bool:
+    """Real market data is OFF unless an operator deliberately sets LIVE_DATA_ENABLED=true.
+
+    Showing exchange data to users is governed by licences (the data vendor's and the exchange's) that this
+    code cannot check, so the switch is explicit, off by default, and logged loudly when on. Mock and replay
+    never need it."""
+    return os.getenv("LIVE_DATA_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _disabled_live(name: str) -> Callable[[dict, str, float], DataSource]:
     def _raise(cfg: dict, underlying: str, poll: float) -> DataSource:
         raise RuntimeError(f"{name} live market provider is disabled. This deployment runs exclusively on MOCK data.")
     return _raise
 
 
+def _dhan(cfg: dict, underlying: str, poll: float) -> DataSource:
+    if not live_data_enabled():
+        raise RuntimeError(
+            "Dhan live market provider is disabled. This deployment runs exclusively on MOCK data. "
+            "To use real data deliberately, set LIVE_DATA_ENABLED=true (see docs/LIVE_DATA.md for the licensing check first)."
+        )
+    from src.data_sources.dhan import DhanMarketDataProvider  # imported late: needs the optional dhanhq package
+
+    log.warning(
+        "LIVE market data is ENABLED (Dhan). Confirm your data licence permits displaying it to every user of this "
+        "deployment before exposing it beyond yourself."
+    )
+    return DhanMarketDataProvider(underlying=underlying, poll_interval=poll)
+
+
 PROVIDERS: dict[str, Callable[[dict, str, float], DataSource]] = {
     "mock": _mock,
     "replay": _replay,
     "nse": _disabled_live("NSE"),
-    "dhan": _disabled_live("Dhan"),
+    "dhan": _dhan,
 }
 
 

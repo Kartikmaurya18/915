@@ -83,6 +83,11 @@ class DataSource(ABC):
         auth or subscription error). Must never contain credentials."""
         return None
 
+    def credentials_expire_at(self):
+        """When this provider's access credentials stop working (a timezone-aware datetime), or None if
+        unknown or they do not expire. Lets the UI warn before a feed is lost mid-session."""
+        return None
+
     def disconnect(self) -> None:
         """Release connections. No-op for providers that hold none."""
 
