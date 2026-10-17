@@ -1,9 +1,17 @@
 import { useCallback, useEffect, useState } from "react";
+import { RefreshCw, ScrollText } from "lucide-react";
 import { api } from "../api/http";
 import type { LogEntry } from "../api/types";
 import { fmtTime } from "../lib/format";
+import { Badge } from "../ui/Badge";
+import { Button } from "../ui/Button";
+import { Card } from "../ui/Card";
+import { EmptyState, ErrorState } from "../ui/feedback";
+import { Checkbox, Select } from "../ui/fields";
+import { PageHeader, TABLE, TD, TH, TableWrap } from "../ui/layout";
 
 const LEVELS = ["", "INFO", "WARNING", "ERROR"] as const;
+const TONE = { error: "neg", warning: "warn", info: "neutral" } as const;
 
 function detail(entry: LogEntry): string {
   if (entry.data === undefined || entry.data === null) return "";
@@ -39,42 +47,66 @@ export default function Logs() {
   }, [load, auto]);
 
   return (
-    <section className="panel">
-      <header className="panel-head">
-        <h2>System logs</h2>
-        <div className="row tight">
-          <select aria-label="Level" value={level} onChange={(e) => setLevel(e.target.value as (typeof LEVELS)[number])}>
-            {LEVELS.map((l) => (
-              <option key={l} value={l}>{l || "All levels"}</option>
-            ))}
-          </select>
-          <label className="check">
-            <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} /> Auto-refresh
-          </label>
-          <button className="btn btn-small" onClick={() => void load()}>Refresh</button>
+    <>
+      <PageHeader title="System logs" description="The latest events from the market engine. Administrators only." />
+      <Card
+        flush
+        actions={
+          <>
+            <Select aria-label="Level" value={level} onChange={(e) => setLevel(e.target.value as (typeof LEVELS)[number])} className="min-h-8 w-auto py-1">
+              {LEVELS.map((l) => (
+                <option key={l} value={l}>
+                  {l || "All levels"}
+                </option>
+              ))}
+            </Select>
+            <label className="flex items-center gap-2 text-sm text-muted">
+              <Checkbox checked={auto} onChange={(e) => setAuto(e.target.checked)} />
+              Auto-refresh
+            </label>
+            <Button size="sm" onClick={() => void load()}>
+              <RefreshCw aria-hidden="true" className="size-3.5" />
+              Refresh
+            </Button>
+          </>
+        }
+      >
+        <div className="px-2 pb-3 sm:px-3">
+          {error && <ErrorState className="mx-2 mb-3">{error}</ErrorState>}
+          {logs?.length === 0 ? (
+            <EmptyState title="No log entries" icon={<ScrollText className="size-5" />} />
+          ) : (
+            <TableWrap label="System logs" className="max-h-144">
+              <table className={TABLE}>
+                <caption className="sr-only">System log entries, newest first</caption>
+                <thead>
+                  <tr>
+                    <th className={TH}>Time</th>
+                    <th className={TH}>Level</th>
+                    <th className={TH}>Event</th>
+                    <th className={TH}>Detail</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {logs?.map((e, i) => {
+                    const lvl = (e.level ?? "info").toLowerCase() as keyof typeof TONE;
+                    return (
+                      <tr key={`${e.timestamp}-${i}`}>
+                        <td className={TD}>{fmtTime(e.timestamp)}</td>
+                        <td className={TD}>
+                          <Badge tone={TONE[lvl] ?? "neutral"}>{e.level ?? "INFO"}</Badge>
+                        </td>
+                        <td className={TD}>{e.event ?? e.event_type}</td>
+                        <td className="min-w-60 whitespace-normal wrap-break-word border-b border-line/70 px-3 py-2 text-muted">{detail(e)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </TableWrap>
+          )}
         </div>
-      </header>
-      {error && <p className="form-error" role="alert">{error}</p>}
-      <div className="table-wrap">
-        <table className="data">
-          <thead>
-            <tr><th>Time</th><th>Level</th><th>Event</th><th>Detail</th></tr>
-          </thead>
-          <tbody>
-            {logs?.length === 0 && (
-              <tr><td colSpan={4} className="empty">No log entries</td></tr>
-            )}
-            {logs?.map((e, i) => (
-              <tr key={`${e.timestamp}-${i}`}>
-                <td>{fmtTime(e.timestamp)}</td>
-                <td><span className={`lvl lvl-${(e.level ?? "info").toLowerCase()}`}>{e.level ?? "INFO"}</span></td>
-                <td>{e.event ?? e.event_type}</td>
-                <td className="log-detail">{detail(e)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </section>
+      </Card>
+    </>
   );
 }

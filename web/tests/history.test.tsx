@@ -4,7 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import History from "../src/pages/History";
 
 // The chart library needs a real canvas; what matters here is the data handed to it.
-vi.mock("../src/components/CandleChart", () => ({
+vi.mock("../src/components/CandleChart", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/components/CandleChart")>()),
   CandleChart: ({ series, resetKey }: { series: unknown[]; resetKey: string }) => <div data-testid="chart" data-key={resetKey} data-bars={series.length} />,
 }));
 

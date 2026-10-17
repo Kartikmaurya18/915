@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App";
-import { AuthProvider } from "../src/auth/AuthContext";
+import { AllProviders } from "./providers";
 import { getAccessToken, setAccessToken } from "../src/api/http";
 import { RealtimeClient } from "../src/realtime/client";
 import { RealtimeProvider } from "../src/realtime/RealtimeProvider";
@@ -33,9 +33,9 @@ function mount(path: string) {
   // App renders its own RealtimeProvider; the injected client is used through the prop on a wrapper.
   return render(
     <MemoryRouter initialEntries={[path]}>
-      <AuthProvider>
+      <AllProviders>
         <InjectedApp client={client} />
-      </AuthProvider>
+      </AllProviders>
     </MemoryRouter>,
   );
 }
@@ -199,9 +199,9 @@ describe("App", () => {
     mockFetch({ "GET /api/auth/me": () => json(401, { detail: { code: "not_authenticated", message: "x" } }) });
     render(
       <MemoryRouter initialEntries={["/trading"]}>
-        <AuthProvider>
+        <AllProviders>
           <App />
-        </AuthProvider>
+        </AllProviders>
       </MemoryRouter>,
     );
     expect(await screen.findByRole("heading", { name: "Sign in" })).toBeTruthy();

@@ -1,7 +1,12 @@
+import type { ReactNode } from "react";
 import { useConfig } from "../api/useConfig";
 import type { IndexTopic } from "../api/types";
 import { fmtAge, fmtInt, fmtTime } from "../lib/format";
 import { useConnection, useTopic } from "../realtime/RealtimeProvider";
+import { Badge } from "../ui/Badge";
+import { Card } from "../ui/Card";
+import { Skeleton } from "../ui/feedback";
+import { PageHeader } from "../ui/layout";
 
 export default function Quality() {
   const { config } = useConfig();
@@ -12,43 +17,44 @@ export default function Quality() {
   const latency = state ? Math.max(0, Date.now() - state.pub) : null;
 
   return (
-    <div className="grid-2">
-      <section className="panel">
-        <header className="panel-head"><h2>Market data</h2></header>
-        <dl className="kv">
-          <Row k="Source" v={dq?.source} />
-          <Row k="Connection" v={dq?.connection_status} />
-          <Row k="Market session" v={dq?.market_session} />
-          <Row k="Last tick" v={dq ? fmtTime(dq.last_tick_time) : undefined} />
-          <Row k="Last tick age" v={dq?.last_tick_age_seconds != null ? `${dq.last_tick_age_seconds.toFixed(1)} s` : undefined} />
-          <Row k="Stale" v={dq ? (dq.is_stale ? `Yes (over ${dq.stale_threshold_seconds}s)` : "No") : undefined} bad={dq?.is_stale} />
-          <Row k="Ticks received" v={dq ? fmtInt(dq.tick_count) : undefined} />
-          <Row k="Duplicate ticks" v={dq ? fmtInt(dq.duplicate_tick_count) : undefined} />
-          <Row k="Rejected ticks" v={dq ? fmtInt(dq.rejected_tick_count) : undefined} />
-          <Row k="History persisted" v={dq ? (dq.persistence_enabled ? "Yes" : "No") : undefined} />
-        </dl>
-      </section>
-      <section className="panel">
-        <header className="panel-head"><h2>Your connection</h2></header>
-        <dl className="kv">
-          <Row k="Status" v={conn.status} />
-          <Row k="Gateway feed age" v={fmtAge(conn.feedAgeMs)} />
-          <Row k="Publish → browser" v={latency === null ? undefined : fmtAge(latency)} />
-          <Row k="Snapshots / patches" v={`${conn.snapshots} / ${conn.patches}`} />
-          <Row k="Resyncs" v={String(conn.resyncs)} />
-          <Row k="Reconnects" v={String(conn.reconnects)} />
-          <Row k="Data received" v={`${(conn.bytes / 1024).toFixed(1)} KB`} />
-        </dl>
-      </section>
-    </div>
+    <>
+      <PageHeader title="Data quality" description="How healthy the market feed and your connection are right now." />
+      <div className="grid gap-4 lg:grid-cols-2 lg:gap-5">
+        <Card title="Market data" actions={dq && <Badge tone={dq.is_stale ? "warn" : "pos"}>{dq.is_stale ? "Stale" : "Fresh"}</Badge>}>
+          <dl className="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2.5 text-sm">
+            <Row k="Source" v={dq?.source} loading={!dq} />
+            <Row k="Connection" v={dq?.connection_status} loading={!dq} />
+            <Row k="Market session" v={dq?.market_session} loading={!dq} />
+            <Row k="Last tick" v={dq ? fmtTime(dq.last_tick_time) : undefined} loading={!dq} />
+            <Row k="Last tick age" v={dq?.last_tick_age_seconds != null ? `${dq.last_tick_age_seconds.toFixed(1)} s` : undefined} loading={!dq} />
+            <Row k="Stale" v={dq ? (dq.is_stale ? `Yes (over ${dq.stale_threshold_seconds}s)` : "No") : undefined} loading={!dq} bad={dq?.is_stale} />
+            <Row k="Ticks received" v={dq ? fmtInt(dq.tick_count) : undefined} loading={!dq} />
+            <Row k="Duplicate ticks" v={dq ? fmtInt(dq.duplicate_tick_count) : undefined} loading={!dq} />
+            <Row k="Rejected ticks" v={dq ? fmtInt(dq.rejected_tick_count) : undefined} loading={!dq} />
+            <Row k="History persisted" v={dq ? (dq.persistence_enabled ? "Yes" : "No") : undefined} loading={!dq} />
+          </dl>
+        </Card>
+        <Card title="Your connection">
+          <dl className="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2.5 text-sm">
+            <Row k="Status" v={conn.status} />
+            <Row k="Gateway feed age" v={fmtAge(conn.feedAgeMs)} />
+            <Row k="Publish → browser" v={latency === null ? undefined : fmtAge(latency)} />
+            <Row k="Snapshots / patches" v={`${conn.snapshots} / ${conn.patches}`} />
+            <Row k="Resyncs" v={String(conn.resyncs)} />
+            <Row k="Reconnects" v={String(conn.reconnects)} />
+            <Row k="Data received" v={`${(conn.bytes / 1024).toFixed(1)} KB`} />
+          </dl>
+        </Card>
+      </div>
+    </>
   );
 }
 
-function Row({ k, v, bad }: { k: string; v: string | undefined; bad?: boolean }) {
+function Row({ k, v, bad, loading }: { k: string; v: ReactNode | undefined; bad?: boolean; loading?: boolean }) {
   return (
     <>
-      <dt>{k}</dt>
-      <dd className={bad ? "neg" : undefined}>{v ?? "—"}</dd>
+      <dt className="text-muted">{k}</dt>
+      <dd className={bad ? "num text-right font-medium text-warn" : "num text-right font-medium"}>{loading ? <Skeleton className="ml-auto h-4 w-20" /> : (v ?? "—")}</dd>
     </>
   );
 }

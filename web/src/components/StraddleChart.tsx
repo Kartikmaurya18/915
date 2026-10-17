@@ -1,15 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Crosshair } from "lucide-react";
 import type { Bar, StraddleCandles, StraddleView, StrikeRow } from "../api/types";
 import { useStraddleCandles } from "../api/useStraddle";
-import { fmt, fmtInt, fmtSigned, pnlClass } from "../lib/format";
-import { CandleChart } from "./CandleChart";
+import { fmt, fmtInt } from "../lib/format";
+import { Badge, DeltaBadge } from "../ui/Badge";
+import { Card } from "../ui/Card";
+import { EmptyState, ErrorState } from "../ui/feedback";
+import { Select } from "../ui/fields";
+import { Segmented } from "../ui/Segmented";
+import { CandleChart, describeSeries } from "./CandleChart";
 
-const VIEWS: { id: StraddleView; label: string }[] = [
-  { id: "straddle", label: "Straddle" },
-  { id: "ce", label: "CE" },
-  { id: "pe", label: "PE" },
+const VIEWS: { value: StraddleView; label: string; title: string }[] = [
+  { value: "straddle", label: "Straddle", title: "Straddle: call plus put" },
+  { value: "ce", label: "CE", title: "Call" },
+  { value: "pe", label: "PE", title: "Put" },
 ];
-const INTERVALS = ["1", "5", "15"];
+const INTERVALS = ["1", "5", "15"] as const;
 
 interface Props {
   /** The strike to chart, or null if there is none yet. */
@@ -35,7 +41,7 @@ function liveValue(row: StrikeRow | null | undefined, view: StraddleView): numbe
 
 export function StraddleChart({ strike, date, initial, liveRow, expiry, chip, options, onPick }: Props) {
   const [view, setView] = useState<StraddleView>("straddle");
-  const [interval, setIntervalKey] = useState("1");
+  const [interval, setIntervalKey] = useState<(typeof INTERVALS)[number]>("1");
   const { data, noData, error } = useStraddleCandles(strike, date, initial);
 
   const bars: Bar[] = useMemo(() => data?.by_interval?.[interval]?.[view] ?? [], [data, interval, view]);
@@ -54,49 +60,45 @@ export function StraddleChart({ strike, date, initial, liveRow, expiry, chip, op
     previous.current = current;
   }, [current, date]);
 
+  const viewName = VIEWS.find((v) => v.value === view)!.title;
   return (
-    <section className="panel" aria-label="Straddle chart">
-      <header className="panel-head">
-        <h2>
+    <Card
+      aria-label="Straddle chart"
+      title={
+        <span className="flex flex-wrap items-center gap-2">
           {date ? "Straddle" : "ATM straddle"} · {strike === null ? "—" : fmtInt(strike)}
-          {expiry && <span className="muted"> · {expiry}</span>}
-        </h2>
-        <div className="row tight">
-          {options && options.length > 1 && onPick ? (
-            <select aria-label="Strike" value={strike ?? ""} onChange={(e) => onPick(Number(e.target.value))}>
+          {expiry && <span className="text-sm font-normal text-muted">{expiry}</span>}
+          {!options && chip && <Badge tone="brand">{chip}</Badge>}
+        </span>
+      }
+      actions={
+        <>
+          {options && options.length > 1 && onPick && (
+            <Select aria-label="Strike" value={strike ?? ""} onChange={(e) => onPick(Number(e.target.value))} className="min-h-8 w-auto py-1">
               {options.map((o) => (
-                <option key={o} value={o}>{fmtInt(o)}</option>
+                <option key={o} value={o}>
+                  {fmtInt(o)}
+                </option>
               ))}
-            </select>
-          ) : (
-            chip && <span className="tag">{chip}</span>
+            </Select>
           )}
-          <div className="seg" role="tablist" aria-label="Series">
-            {VIEWS.map((v) => (
-              <button key={v.id} role="tab" aria-selected={v.id === view} className={v.id === view ? "seg-btn on" : "seg-btn"} onClick={() => setView(v.id)}>
-                {v.label}
-              </button>
-            ))}
-          </div>
-          <div className="seg" role="tablist" aria-label="Straddle interval">
-            {INTERVALS.map((i) => (
-              <button key={i} role="tab" aria-selected={i === interval} className={i === interval ? "seg-btn on" : "seg-btn"} onClick={() => setIntervalKey(i)}>
-                {i}m
-              </button>
-            ))}
-          </div>
-        </div>
-      </header>
-      <p className="straddle-now">
-        <strong>{fmt(current)}</strong>{" "}
-        {!date && change !== null && <span className={pnlClass(change)}>{fmtSigned(change)}</span>}
-      </p>
+          <Segmented label="Series" size="sm" value={view} onChange={setView} options={VIEWS} />
+          <Segmented label="Straddle interval" size="sm" value={interval} onChange={setIntervalKey} options={INTERVALS.map((i) => ({ value: i, label: `${i}m`, title: `${i} minute candles` }))} />
+        </>
+      }
+    >
+      <div className="mb-2 flex items-baseline gap-2">
+        <span className="num text-2xl font-semibold tracking-tight">{fmt(current)}</span>
+        {!date && change !== null && <DeltaBadge value={change} />}
+      </div>
       {strike === null || (noData && bars.length === 0) ? (
-        <p className="empty">{strike === null ? "Waiting for an ATM strike…" : date ? "No candle data for this strike on this date." : "No candle data yet for this strike."}</p>
+        <EmptyState title={strike === null ? "Waiting for an ATM strike" : "No candles for this strike yet"} icon={<Crosshair className="size-5" />}>
+          {date ? "There is no candle data for this strike on this date." : "Candles appear after the first few ticks."}
+        </EmptyState>
       ) : (
-        <CandleChart series={bars} resetKey={`${strike}:${date ?? "live"}:${interval}:${view}`} />
+        <CandleChart series={bars} resetKey={`${strike}:${date ?? "live"}:${interval}:${view}`} summary={describeSeries(`${viewName} for strike ${fmtInt(strike)}, ${interval} minute candles`, bars, "candles")} height="clamp(220px, 36vw, 340px)" />
       )}
-      {error && <p className="form-error" role="alert">{error}</p>}
-    </section>
+      {error && <ErrorState className="mt-3">{error}</ErrorState>}
+    </Card>
   );
 }

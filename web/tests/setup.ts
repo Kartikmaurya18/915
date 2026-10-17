@@ -25,3 +25,21 @@ class MemoryStorage implements Storage {
 
 Object.defineProperty(globalThis, "localStorage", { value: new MemoryStorage(), configurable: true });
 Object.defineProperty(globalThis, "sessionStorage", { value: new MemoryStorage(), configurable: true });
+
+// jsdom has no modal <dialog>. Real browsers provide the focus trap, the inert page and Escape handling
+// (checked in a real browser by the end-to-end run); here it is enough to track the `open` state.
+if (typeof HTMLDialogElement !== "undefined") {
+  HTMLDialogElement.prototype.showModal = function showModal(this: HTMLDialogElement) {
+    this.setAttribute("open", "");
+  };
+  HTMLDialogElement.prototype.close = function close(this: HTMLDialogElement) {
+    if (!this.hasAttribute("open")) return;
+    this.removeAttribute("open");
+    this.dispatchEvent(new Event("close"));
+  };
+}
+
+// jsdom does not implement scrolling.
+if (typeof Element !== "undefined" && !Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = function scrollIntoView() {};
+}

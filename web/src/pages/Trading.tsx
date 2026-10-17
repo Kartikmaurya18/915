@@ -1,29 +1,62 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Link, useSearchParams } from "react-router-dom";
+import { ShieldCheck, X, Zap } from "lucide-react";
 import { api } from "../api/http";
-import type { OpenPositionBody, OptionsTopic, PaperConfig, PaperPosition, PaperState } from "../api/types";
+import type { OptionsTopic, PaperConfig, PaperPosition, PaperState } from "../api/types";
 import { useConfig } from "../api/useConfig";
 import { usePaperState } from "../api/usePaperState";
-import { fmt, fmtDateTime, fmtInt, fmtSigned, pnlClass } from "../lib/format";
+import { fmt, fmtDateTime, fmtInt, fmtSigned } from "../lib/format";
 import { useTopic } from "../realtime/RealtimeProvider";
 import { executeEntries, summarise } from "../state/execute";
 import { sorted, type Selected } from "../state/selection";
 import { useSelection } from "../state/SelectionContext";
+import { Badge, Signed } from "../ui/Badge";
+import { Button } from "../ui/Button";
+import { Card } from "../ui/Card";
+import { cn } from "../ui/cn";
+import { EmptyState, ErrorState, FormMessage } from "../ui/feedback";
+import { Field, Input } from "../ui/fields";
+import { Metric, MetricGrid, PageHeader, R, TABLE, TD, TH, TableWrap } from "../ui/layout";
+import { Segmented } from "../ui/Segmented";
+import { useUI } from "../ui/UIProvider";
 
 export default function Trading() {
   const { state, error, refresh } = usePaperState();
+  const { openOrder } = useUI();
+  const [params, setParams] = useSearchParams();
+
+  // Links like /trading?type=PE&strike=24800 open the order panel with that contract filled in.
+  useEffect(() => {
+    const type = params.get("type");
+    const strike = params.get("strike");
+    if (type === "CE" || type === "PE") {
+      openOrder({ optionType: type, strike: strike ? Number(strike) : null });
+      setParams({}, { replace: true });
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   return (
     <>
-      <p className="notice-line">Simulated trading only. Prices come from the live feed; no real orders are placed.</p>
-      {error && !state && <p className="form-error" role="alert">{error}</p>}
+      <PageHeader
+        title="Paper Trading"
+        description="Practice trading with live prices. Nothing here is a real order."
+        actions={
+          <Button variant="primary" onClick={() => openOrder()}>
+            <Zap aria-hidden="true" className="size-4" />
+            New simulated order
+          </Button>
+        }
+      />
+      <p className="flex items-center gap-2 rounded-control bg-brand-soft px-3 py-2 text-sm text-brand-fg">
+        <ShieldCheck aria-hidden="true" className="size-4 shrink-0" />
+        Simulated trading only. Prices come from the live feed; no real orders are placed and no real money moves.
+      </p>
+      {error && !state && <ErrorState>{error}</ErrorState>}
       <Summary state={state} />
       <SelectedContracts onDone={refresh} />
-      <div className="grid-2">
-        <OrderForm onDone={refresh} />
-        <ConfigForm config={state?.config} onDone={refresh} />
-      </div>
-      <Positions title="Open positions" rows={state?.open_positions ?? []} onClose={refresh} open />
-      <Positions title="History" rows={state?.history ?? []} onClose={refresh} />
+      <ConfigForm config={state?.config} onDone={refresh} />
+      <Positions title="Open positions" rows={state?.open_positions ?? []} onClose={refresh} open loading={!state} />
+      <Positions title="History" rows={state?.history ?? []} onClose={refresh} loading={!state} />
     </>
   );
 }
@@ -31,39 +64,21 @@ export default function Trading() {
 function Summary({ state }: { state: PaperState | null }) {
   const p = state?.pnl_summary;
   const s = state?.stats;
+  const loading = !state;
+  const tone = !p || p.total_pnl === 0 ? "neutral" : p.total_pnl > 0 ? "pos" : "neg";
   return (
-    <section className="metrics" aria-label="Paper trading summary">
-      <div className="metric">
-        <span className="metric-label">Total P&amp;L</span>
-        <strong className={`metric-value ${pnlClass(p?.total_pnl)}`}>{fmtSigned(p?.total_pnl)}</strong>
-        <span className="metric-sub">Realised {fmtSigned(p?.realized_pnl)} · Unrealised {fmtSigned(p?.unrealized_pnl)}</span>
-      </div>
-      <div className="metric">
-        <span className="metric-label">Open positions</span>
-        <strong className="metric-value">{p ? p.open_position_count : "—"}</strong>
-      </div>
-      <div className="metric">
-        <span className="metric-label">Win rate</span>
-        <strong className="metric-value">{s ? `${fmt(s.win_rate_percent, 1)}%` : "—"}</strong>
-        <span className="metric-sub">{s ? `${s.wins}W · ${s.losses}L of ${s.total_trades}` : undefined}</span>
-      </div>
-      <div className="metric">
-        <span className="metric-label">Max drawdown</span>
-        <strong className="metric-value">{s ? fmt(s.max_drawdown) : "—"}</strong>
-      </div>
-      <div className="metric">
-        <span className="metric-label">Open position value</span>
-        <strong className="metric-value">{p ? fmt(p.total_position_value) : "—"}</strong>
-      </div>
-      <div className="metric">
-        <span className="metric-label">Turnover</span>
-        <strong className="metric-value">{p ? fmt(p.total_turnover) : "—"}</strong>
-        <span className="metric-sub">{p ? "Buy " + fmt(p.buy_turnover) + " · Sell " + fmt(p.sell_turnover) : undefined}</span>
-      </div>
-      <div className="metric">
-        <span className="metric-label">Total P&amp;L %</span>
-        <strong className={"metric-value " + pnlClass(p?.total_pnl_percent)}>{p ? fmtSigned(p.total_pnl_percent) + "%" : "—"}</strong>
-      </div>
+    <section aria-label="Paper trading summary" className="grid gap-3">
+      <MetricGrid>
+        <Metric label="Total P&L" value={p ? fmtSigned(p.total_pnl) : "—"} tone={tone} delta={p?.total_pnl_percent} deltaPercent loading={loading} sub={p ? `Realised ${fmtSigned(p.realized_pnl)} · Unrealised ${fmtSigned(p.unrealized_pnl)}` : undefined} />
+        <Metric label="Open positions" value={p ? p.open_position_count : "—"} loading={loading} sub={p ? `Value ${fmt(p.total_position_value)}` : undefined} />
+        <Metric label="Win rate" value={s ? `${fmt(s.win_rate_percent, 1)}%` : "—"} loading={loading} sub={s ? `${s.wins}W · ${s.losses}L of ${s.total_trades}` : undefined} />
+        <Metric label="Turnover" value={p ? fmt(p.total_turnover) : "—"} loading={loading} sub={p ? `Buy ${fmt(p.buy_turnover)} · Sell ${fmt(p.sell_turnover)}` : undefined} />
+      </MetricGrid>
+      <MetricGrid columns={3}>
+        <Metric label="Max drawdown" value={s ? fmt(s.max_drawdown) : "—"} loading={loading} />
+        <Metric label="Average win" value={s ? fmt(s.average_win) : "—"} loading={loading} />
+        <Metric label="Average loss" value={s ? fmt(s.average_loss) : "—"} loading={loading} />
+      </MetricGrid>
     </section>
   );
 }
@@ -95,92 +110,111 @@ function SelectedContracts({ onDone }: { onDone: () => Promise<void> }) {
   }
 
   return (
-    <section className="panel">
-      <header className="panel-head">
-        <h2>Selected contracts</h2>
-        <div className="row tight">
-          <label className="inline">
+    <Card
+      title="Selected contracts"
+      description="Chosen in the option chain. One contract is a single trade; several is a multi-strike trade."
+      flush
+      actions={
+        <>
+          <label className="flex items-center gap-2 text-sm text-muted">
             Default qty
-            <input
-              className="narrow"
+            <Input
               inputMode="numeric"
               value={sel.defaultQuantity}
               onChange={(e) => sel.setDefaultQuantity(Math.max(1, Math.floor(Number(e.target.value)) || 1))}
+              className="min-h-8 w-20 py-1 text-right"
             />
           </label>
           {entries.length > 0 && (
-            <button className="btn btn-small" onClick={sel.clear}>
+            <Button size="sm" onClick={sel.clear}>
               Clear
-            </button>
+            </Button>
           )}
-          <button className="btn btn-primary btn-small" disabled={entries.length === 0 || busy !== null} onClick={() => void run(entries, "all")}>
+          <Button size="sm" variant="primary" disabled={entries.length === 0 || busy !== null} loading={busy === "all"} onClick={() => void run(entries, "all")}>
             {busy === "all" ? "Executing…" : entries.length ? "Execute " + entries.length + " selected" : "Execute selected"}
-          </button>
-        </div>
-      </header>
-      {entries.length === 0 ? (
-        <p className="empty">
-          No contracts selected. Tick CE / PE boxes in the <Link to="/">option chain</Link> to add them here: one for a single trade, several for a multi-strike trade.
-        </p>
-      ) : (
-        <div className="table-wrap">
-          <table className="data">
-            <thead>
-              <tr>
-                <th className="r">Strike</th>
-                <th>Type</th>
-                <th className="r">LTP</th>
-                <th className="r">Δ</th>
-                <th>Expiry</th>
-                <th>Side</th>
-                <th className="r">Qty</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {entries.map((e) => {
-                const row = options?.strikes.find((r) => r.strike === e.strike);
-                const ce = e.optionType === "CE";
-                return (
-                  <tr key={e.key}>
-                    <td className="r">{fmtInt(e.strike)}</td>
-                    <td className={ce ? "call" : "put"}>{e.optionType}</td>
-                    <td className="r">{fmt(ce ? row?.call_ltp : row?.put_ltp)}</td>
-                    <td className="r muted">{fmt(ce ? row?.call_delta : row?.put_delta, 3)}</td>
-                    <td>{e.expiry ?? "—"}</td>
-                    <td>
-                      <div className="seg" role="group" aria-label={"Side for " + e.strike + " " + e.optionType}>
-                        {(["BUY", "SELL"] as const).map((side) => (
-                          <button key={side} type="button" className={e.side === side ? "seg-btn on" : "seg-btn"} aria-pressed={e.side === side} onClick={() => sel.update(e.key, { side })}>
-                            {side}
+          </Button>
+        </>
+      }
+    >
+      <div className="px-2 pb-3 sm:px-3">
+        {entries.length === 0 ? (
+          <EmptyState title="No contracts selected">
+            Tick CE or PE boxes in the{" "}
+            <Link to="/" className="font-medium text-brand-fg underline">
+              option chain
+            </Link>{" "}
+            to add them here.
+          </EmptyState>
+        ) : (
+          <TableWrap label="Selected contracts">
+            <table className={TABLE}>
+              <caption className="sr-only">Contracts selected for simulated trading</caption>
+              <thead>
+                <tr>
+                  <th className={cn(TH, R)}>Strike</th>
+                  <th className={TH}>Type</th>
+                  <th className={cn(TH, R)}>LTP</th>
+                  <th className={cn(TH, R)}>Δ</th>
+                  <th className={TH}>Expiry</th>
+                  <th className={TH}>Side</th>
+                  <th className={cn(TH, R)}>Qty</th>
+                  <th className={TH}>
+                    <span className="sr-only">Actions</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {entries.map((e) => {
+                  const row = options?.strikes.find((r) => r.strike === e.strike);
+                  const ce = e.optionType === "CE";
+                  return (
+                    <tr key={e.key}>
+                      <td className={cn(TD, R)}>{fmtInt(e.strike)}</td>
+                      <td className={TD}>
+                        <Badge tone={ce ? "pos" : "neg"}>{e.optionType}</Badge>
+                      </td>
+                      <td className={cn(TD, R)}>{fmt(ce ? row?.call_ltp : row?.put_ltp)}</td>
+                      <td className={cn(TD, R, "text-muted")}>{fmt(ce ? row?.call_delta : row?.put_delta, 3)}</td>
+                      <td className={TD}>{e.expiry ?? "—"}</td>
+                      <td className={TD}>
+                        <Segmented
+                          label={`Side for ${e.strike} ${e.optionType}`}
+                          size="sm"
+                          value={e.side}
+                          onChange={(side) => sel.update(e.key, { side })}
+                          options={[
+                            { value: "BUY", label: "Buy" },
+                            { value: "SELL", label: "Sell" },
+                          ]}
+                        />
+                      </td>
+                      <td className={cn(TD, R)}>
+                        <QuantityInput value={e.quantity} onCommit={(q) => sel.update(e.key, { quantity: q })} label={"Quantity for " + e.strike + " " + e.optionType} />
+                      </td>
+                      <td className={TD}>
+                        <div className="flex items-center gap-1.5">
+                          <Button size="sm" disabled={busy !== null} onClick={() => void run([e], e.key)}>
+                            {busy === e.key ? "…" : "Execute"}
+                          </Button>
+                          <button type="button" aria-label={`Remove ${fmtInt(e.strike)} ${e.optionType}`} onClick={() => sel.remove([e.key])} className="grid size-8 place-items-center rounded-control text-muted hover:bg-surface-2 hover:text-neg">
+                            <X aria-hidden="true" className="size-4" />
                           </button>
-                        ))}
-                      </div>
-                    </td>
-                    <td className="r">
-                      <QuantityInput value={e.quantity} onCommit={(q) => sel.update(e.key, { quantity: q })} label={"Quantity for " + e.strike + " " + e.optionType} />
-                    </td>
-                    <td className="actions">
-                      <button className="btn btn-small" disabled={busy !== null} onClick={() => void run([e], e.key)}>
-                        {busy === e.key ? "…" : "Execute"}
-                      </button>{" "}
-                      <button className="btn btn-small btn-quiet" onClick={() => sel.remove([e.key])}>
-                        Remove
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-      {message && (
-        <p className={message.ok ? "form-ok" : "form-error"} role={message.ok ? "status" : "alert"}>
-          {message.text}
-        </p>
-      )}
-    </section>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </TableWrap>
+        )}
+        {message && (
+          <div className="mt-3 px-2">
+            <FormMessage ok={message.ok}>{message.text}</FormMessage>
+          </div>
+        )}
+      </div>
+    </Card>
   );
 }
 
@@ -189,8 +223,8 @@ function QuantityInput({ value, onCommit, label }: { value: number; onCommit: (q
   const [text, setText] = useState(String(value));
   useEffect(() => setText(String(value)), [value]);
   return (
-    <input
-      className="narrow"
+    <Input
+      className="min-h-8 w-20 py-1 text-right"
       inputMode="numeric"
       aria-label={label}
       value={text}
@@ -201,88 +235,6 @@ function QuantityInput({ value, onCommit, label }: { value: number; onCommit: (q
       }}
       onBlur={() => setText(String(value))}
     />
-  );
-}
-
-function newKey(): string {
-  return crypto.randomUUID();
-}
-
-function OrderForm({ onDone }: { onDone: () => Promise<void> }) {
-  const [params] = useSearchParams();
-  const [type, setType] = useState<"CE" | "PE">(params.get("type") === "PE" ? "PE" : "CE");
-  const [side, setSide] = useState<"BUY" | "SELL">("BUY");
-  const [strike, setStrike] = useState(params.get("strike") ?? "");
-  const [qty, setQty] = useState("50");
-  const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
-
-  // One Idempotency-Key per distinct order. A retry of the same order (e.g. after a dropped response)
-  // reuses it and cannot open a second position; changing any field starts a new order.
-  const key = useRef(newKey());
-  useEffect(() => {
-    key.current = newKey();
-  }, [type, side, strike, qty]);
-
-  async function submit(e: FormEvent) {
-    e.preventDefault();
-    if (busy) return;
-    const quantity = Number(qty);
-    if (!Number.isInteger(quantity) || quantity <= 0) {
-      setMessage({ ok: false, text: "Quantity must be a whole number above zero." });
-      return;
-    }
-    const body: OpenPositionBody = { option_type: type, side, quantity, strike: strike === "" ? null : Number(strike) };
-    setBusy(true);
-    setMessage(null);
-    try {
-      const pos = await api.post<PaperPosition>("/api/paper/open", body, { "Idempotency-Key": key.current });
-      setMessage({ ok: true, text: `${pos.side} ${pos.quantity} × ${fmtInt(pos.strike)} ${pos.option_type} at ${fmt(pos.entry_price)}` });
-      key.current = newKey();
-      await onDone();
-    } catch (err) {
-      setMessage({ ok: false, text: err instanceof Error ? err.message : "Order failed" });
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <form className="panel form" onSubmit={submit}>
-      <h2>New simulated position</h2>
-      <div className="row">
-        <fieldset className="seg" aria-label="Option type">
-          {(["CE", "PE"] as const).map((t) => (
-            <button key={t} type="button" className={type === t ? "seg-btn on" : "seg-btn"} aria-pressed={type === t} onClick={() => setType(t)}>
-              {t}
-            </button>
-          ))}
-        </fieldset>
-        <fieldset className="seg" aria-label="Side">
-          {(["BUY", "SELL"] as const).map((s) => (
-            <button key={s} type="button" className={side === s ? "seg-btn on" : "seg-btn"} aria-pressed={side === s} onClick={() => setSide(s)}>
-              {s}
-            </button>
-          ))}
-        </fieldset>
-      </div>
-      <label>
-        Strike <span className="hint">(blank = at the money)</span>
-        <input inputMode="decimal" value={strike} onChange={(e) => setStrike(e.target.value)} placeholder="ATM" />
-      </label>
-      <label>
-        Quantity
-        <input inputMode="numeric" value={qty} onChange={(e) => setQty(e.target.value)} />
-      </label>
-      <button className="btn btn-primary" type="submit" disabled={busy}>
-        {busy ? "Placing…" : "Place simulated order"}
-      </button>
-      {message && (
-        <p className={message.ok ? "form-ok" : "form-error"} role={message.ok ? "status" : "alert"}>
-          {message.text}
-        </p>
-      )}
-    </form>
   );
 }
 
@@ -312,12 +264,7 @@ function ConfigForm({ config, onDone }: { config: PaperConfig | undefined; onDon
     setBusy(true);
     setMessage(null);
     try {
-      await api.post("/api/paper/config", {
-        take_profit_percent: num(tp),
-        stop_loss_percent: num(sl),
-        take_profit_amount: num(tpAmt),
-        stop_loss_amount: num(slAmt),
-      });
+      await api.post("/api/paper/config", { take_profit_percent: num(tp), stop_loss_percent: num(sl), take_profit_amount: num(tpAmt), stop_loss_amount: num(slAmt) });
       setMessage({ ok: true, text: "Saved. Applies to positions opened from now on." });
       await onDone();
     } catch (err) {
@@ -328,41 +275,26 @@ function ConfigForm({ config, onDone }: { config: PaperConfig | undefined; onDon
   }
 
   return (
-    <form className="panel form" onSubmit={submit}>
-      <h2>Take profit / stop loss</h2>
-      <div className="row">
-        <label>
-          Take profit %
-          <input inputMode="decimal" value={tp} onChange={(e) => setTp(e.target.value)} />
-        </label>
-        <label>
-          Stop loss %
-          <input inputMode="decimal" value={sl} onChange={(e) => setSl(e.target.value)} />
-        </label>
-      </div>
-      <div className="row">
-        <label>
-          Profit target ₹ <span className="hint">(optional)</span>
-          <input inputMode="decimal" value={tpAmt} onChange={(e) => setTpAmt(e.target.value)} />
-        </label>
-        <label>
-          Loss limit ₹ <span className="hint">(optional)</span>
-          <input inputMode="decimal" value={slAmt} onChange={(e) => setSlAmt(e.target.value)} />
-        </label>
-      </div>
-      <button className="btn" type="submit" disabled={busy}>
-        {busy ? "Saving…" : "Save"}
-      </button>
-      {message && (
-        <p className={message.ok ? "form-ok" : "form-error"} role={message.ok ? "status" : "alert"}>
-          {message.text}
-        </p>
-      )}
-    </form>
+    <Card title="Take profit and stop loss" description="Positions close automatically when either threshold is reached.">
+      <form onSubmit={submit} className="grid gap-4">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <Field label="Take profit %">{(p) => <Input {...p} inputMode="decimal" value={tp} onChange={(e) => setTp(e.target.value)} />}</Field>
+          <Field label="Stop loss %">{(p) => <Input {...p} inputMode="decimal" value={sl} onChange={(e) => setSl(e.target.value)} />}</Field>
+          <Field label="Profit target ₹" hint="Optional">{(p) => <Input {...p} inputMode="decimal" value={tpAmt} onChange={(e) => setTpAmt(e.target.value)} />}</Field>
+          <Field label="Loss limit ₹" hint="Optional">{(p) => <Input {...p} inputMode="decimal" value={slAmt} onChange={(e) => setSlAmt(e.target.value)} />}</Field>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <Button type="submit" loading={busy}>
+            {busy ? "Saving…" : "Save"}
+          </Button>
+          {message && <FormMessage ok={message.ok}>{message.text}</FormMessage>}
+        </div>
+      </form>
+    </Card>
   );
 }
 
-function Positions({ title, rows, onClose, open = false }: { title: string; rows: PaperPosition[]; onClose: () => Promise<void>; open?: boolean }) {
+function Positions({ title, rows, onClose, open = false, loading }: { title: string; rows: PaperPosition[]; onClose: () => Promise<void>; open?: boolean; loading: boolean }) {
   const [closing, setClosing] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -382,62 +314,59 @@ function Positions({ title, rows, onClose, open = false }: { title: string; rows
   }
 
   return (
-    <section className="panel">
-      <header className="panel-head">
-        <h2>{title}</h2>
-        <span className="muted">{rows.length}</span>
-      </header>
-      {error && <p className="form-error" role="alert">{error}</p>}
-      <div className="table-wrap">
-        <table className="data">
-          <thead>
-            <tr>
-              <th>Contract</th>
-              <th className="r">Qty</th>
-              <th className="r">Entry</th>
-              <th className="r">{open ? "Now" : "Exit"}</th>
-              <th className="r">P&amp;L</th>
-              {open ? <th className="r">TP / SL</th> : <th>Reason</th>}
-              <th>{open ? "" : "Closed"}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.length === 0 && (
-              <tr>
-                <td colSpan={7} className="empty">{open ? "No open positions" : "No closed trades yet"}</td>
-              </tr>
-            )}
-            {rows.map((p) => (
-              <tr key={p.id}>
-                <td>
-                  <span className={p.option_type === "CE" ? "call" : "put"}>{fmtInt(p.strike)} {p.option_type}</span>{" "}
-                  <span className="tag">{p.side}</span>
-                </td>
-                <td className="r">{fmtInt(p.quantity)}</td>
-                <td className="r">{fmt(p.entry_price)}</td>
-                <td className="r">{fmt(open ? p.current_price : p.exit_price)}</td>
-                <td className={`r ${pnlClass(p.pnl)}`}>
-                  {fmtSigned(p.pnl)} <span className="muted">({fmtSigned(p.pnl_percent)}%)</span>
-                </td>
-                {open ? (
-                  <td className="r">{fmt(p.take_profit_price)} / {fmt(p.stop_loss_price)}</td>
-                ) : (
-                  <td>{p.exit_reason ?? "—"}</td>
-                )}
-                <td>
-                  {open ? (
-                    <button className="btn btn-small" disabled={closing === p.id} onClick={() => void close(p.id)}>
-                      {closing === p.id ? "Closing…" : "Close"}
-                    </button>
-                  ) : (
-                    fmtDateTime(p.exit_time)
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+    <Card title={title} description={`${rows.length} ${rows.length === 1 ? "position" : "positions"}`} flush>
+      <div className="px-2 pb-3 sm:px-3">
+        {error && <ErrorState className="mx-2 mb-3">{error}</ErrorState>}
+        {loading ? (
+          <div role="status" aria-busy="true" className="mx-2 h-24 animate-pulse rounded-control bg-surface-2">
+            <span className="sr-only">Loading</span>
+          </div>
+        ) : rows.length === 0 ? (
+          <EmptyState title={open ? "No open positions" : "No closed trades yet"}>{open ? "Use New simulated order, or select contracts in the option chain." : "Closed positions appear here."}</EmptyState>
+        ) : (
+          <TableWrap label={title} className="max-h-112">
+            <table className={TABLE}>
+              <caption className="sr-only">{title}</caption>
+              <thead>
+                <tr>
+                  <th className={TH}>Contract</th>
+                  <th className={cn(TH, R)}>Qty</th>
+                  <th className={cn(TH, R)}>Entry</th>
+                  <th className={cn(TH, R)}>{open ? "Now" : "Exit"}</th>
+                  <th className={cn(TH, R)}>P&amp;L</th>
+                  <th className={cn(TH, open && R)}>{open ? "TP / SL" : "Reason"}</th>
+                  <th className={TH}>{open ? <span className="sr-only">Close</span> : "Closed"}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((p) => (
+                  <tr key={p.id}>
+                    <td className={TD}>
+                      <span className="font-medium">{fmtInt(p.strike)}</span> <Badge tone={p.option_type === "CE" ? "pos" : "neg"}>{p.option_type}</Badge> <Badge>{p.side}</Badge>
+                    </td>
+                    <td className={cn(TD, R)}>{fmtInt(p.quantity)}</td>
+                    <td className={cn(TD, R)}>{fmt(p.entry_price)}</td>
+                    <td className={cn(TD, R)}>{fmt(open ? p.current_price : p.exit_price)}</td>
+                    <td className={cn(TD, R)}>
+                      <Signed value={p.pnl} /> <span className="text-xs text-muted">({fmtSigned(p.pnl_percent)}%)</span>
+                    </td>
+                    {open ? <td className={cn(TD, R)}>{fmt(p.take_profit_price)} / {fmt(p.stop_loss_price)}</td> : <td className={TD}>{p.exit_reason ?? "—"}</td>}
+                    <td className={TD}>
+                      {open ? (
+                        <Button size="sm" disabled={closing === p.id} onClick={() => void close(p.id)}>
+                          {closing === p.id ? "Closing…" : "Close"}
+                        </Button>
+                      ) : (
+                        fmtDateTime(p.exit_time)
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </TableWrap>
+        )}
       </div>
-    </section>
+    </Card>
   );
 }

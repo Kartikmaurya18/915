@@ -65,3 +65,12 @@ export function fmtAge(ms: number | null | undefined): string {
   if (ms < 60_000) return `${(ms / 1000).toFixed(1)} s`;
   return `${Math.floor(ms / 60_000)} min`;
 }
+
+const istDay = new Intl.DateTimeFormat("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", year: "numeric" });
+
+/** A calendar day from an epoch-seconds bar time, as India's date ("16 Oct 2026"). */
+export function fmtDay(epochSeconds: number | null | undefined): string {
+  if (epochSeconds === null || epochSeconds === undefined) return MISSING;
+  const d = new Date(epochSeconds * 1000);
+  return Number.isNaN(d.getTime()) ? MISSING : istDay.format(d);
+}

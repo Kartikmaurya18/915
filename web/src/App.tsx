@@ -1,5 +1,7 @@
 import { lazy, Suspense } from "react";
 import { Route, Routes } from "react-router-dom";
+import { Compass } from "lucide-react";
+import { EmptyState } from "./ui/feedback";
 import { Layout } from "./components/Layout";
 import { RedirectIfAuthed, RequireAdmin, RequireAuth, Splash } from "./components/guards";
 import { RealtimeProvider } from "./realtime/RealtimeProvider";
@@ -16,9 +18,10 @@ const Settings = lazy(() => import("./pages/Settings"));
 
 function NotFound() {
   return (
-    <div className="panel notice">
-      <h2>Page not found</h2>
-      <p>That address does not exist.</p>
+    <div className="rounded-card border border-line bg-surface shadow-card">
+      <EmptyState title="Page not found" icon={<Compass className="size-5" />}>
+        That address does not exist.
+      </EmptyState>
     </div>
   );
 }

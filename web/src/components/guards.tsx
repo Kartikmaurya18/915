@@ -1,9 +1,11 @@
 import { Navigate, Outlet, useLocation } from "react-router-dom";
+import { Lock } from "lucide-react";
 import { useAuth } from "../auth/AuthContext";
+import { EmptyState } from "../ui/feedback";
 
 export function Splash({ message = "Loading…" }: { message?: string }) {
   return (
-    <div className="splash" role="status">
+    <div role="status" className="grid min-h-[40dvh] place-items-center text-sm text-muted">
       {message}
     </div>
   );
@@ -23,9 +25,10 @@ export function RequireAdmin() {
   const { user } = useAuth();
   if (user?.role !== "admin") {
     return (
-      <div className="panel notice">
-        <h2>Admin only</h2>
-        <p>Your account does not have access to this page.</p>
+      <div className="rounded-card border border-line bg-surface shadow-card">
+        <EmptyState title="Admin only" icon={<Lock className="size-5" />}>
+          Your account does not have access to this page.
+        </EmptyState>
       </div>
     );
   }

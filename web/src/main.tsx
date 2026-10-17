@@ -4,16 +4,22 @@ import { BrowserRouter } from "react-router-dom";
 import { App } from "./App";
 import { AuthProvider } from "./auth/AuthContext";
 import { SelectionProvider } from "./state/SelectionContext";
+import { ThemeProvider } from "./theme/ThemeProvider";
+import { UIProvider } from "./ui/UIProvider";
 import "./styles.css";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <BrowserRouter>
-      <AuthProvider>
-        <SelectionProvider>
-          <App />
-        </SelectionProvider>
-      </AuthProvider>
+      <ThemeProvider>
+        <AuthProvider>
+          <SelectionProvider>
+            <UIProvider>
+              <App />
+            </UIProvider>
+          </SelectionProvider>
+        </AuthProvider>
+      </ThemeProvider>
     </BrowserRouter>
   </StrictMode>,
 );
