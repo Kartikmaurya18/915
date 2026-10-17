@@ -44,9 +44,11 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
         or "mock"
     )
     config["market_data_provider"] = config["data_source"] = str(provider).lower()
-    # Where Greeks come from (see src/option_chain/greeks.py). Only
-    # "provider" exists today; an internal calculator is a future addition.
-    config["greeks_source"] = os.getenv("GREEKS_SOURCE", config.get("greeks_source", "provider"))
+    # Where Greeks come from (see src/option_chain/greeks.py): "provider" or "calculated"
+    # (provider values plus an internal Black-Scholes calculator for whatever is missing).
+    config["greeks_source"] = os.getenv("GREEKS_SOURCE", config.get("greeks_source", "calculated"))
+    config["risk_free_rate"] = float(os.getenv("RISK_FREE_RATE", config.get("risk_free_rate", 0.065)))
+    config["dividend_yield"] = float(os.getenv("DIVIDEND_YIELD", config.get("dividend_yield", 0.012)))
     # Order execution backend (see src/execution/). Only "paper" exists —
     # live broker execution is deliberately not implemented.
     config["execution_mode"] = os.getenv("EXECUTION_MODE", config.get("execution_mode", "paper"))

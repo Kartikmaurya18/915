@@ -72,16 +72,18 @@ def test_mock_provider_returns_normalized_chain_without_invented_fields():
     assert chain.provider == "MOCK"
     assert chain.exchange == "NSE"
     assert chain.expiries == [chain.expiry]
-    assert chain.greeks_source == GREEKS_FROM_PROVIDER
+    assert chain.greeks_source is None  # a simulated feed has no exchange Greeks
     assert chain.timestamp.tzinfo is not None
     assert len(chain.strikes) == 11
     for leg in chain.strikes:
         assert leg.strike % 50 == 0
-        assert leg.call_delta is not None and leg.put_delta is not None
-        # MOCK supplies no IV / bid / ask / security id — they stay None.
+        # MOCK supplies no Greeks / IV / security id - they stay None until the calculator derives them.
+        assert leg.call_delta is None and leg.put_delta is None
         assert leg.call_iv is None and leg.put_iv is None
-        assert leg.call_bid is None and leg.put_ask is None
         assert leg.call_instrument_id is None
+        # It does supply a consistent quote: bid <= ltp <= ask, and OI with a previous-session baseline.
+        assert 0 < leg.call_bid <= leg.call_ltp <= leg.call_ask and 0 < leg.put_bid <= leg.put_ltp <= leg.put_ask
+        assert leg.call_oi > 0 and leg.call_oi_prev > 0
 
 
 def test_sensex_mock_uses_bse_and_100_point_strikes():
@@ -91,8 +93,8 @@ def test_sensex_mock_uses_bse_and_100_point_strikes():
     strikes = [leg.strike for leg in chain.strikes]
     assert all(s % 100 == 0 for s in strikes)
     assert strikes == sorted(strikes) and strikes[1] - strikes[0] == 100
-    # ATM-by-delta still finds the strike nearest 0.50 on a non-NIFTY chain.
-    atm = find_atm_strike_delta(chain, 0.5)
+    # With calculated Greeks, ATM-by-delta finds the strike nearest 0.50 on a non-NIFTY chain.
+    atm = find_atm_strike_delta(build_greeks_engine("calculated").enrich(chain), 0.5)
     assert abs(atm.strike - chain.underlying_ltp) <= 100
 
 
@@ -332,7 +334,7 @@ def test_crashed_feed_is_reported_as_error():
 
 
 def test_mock_engine_snapshot_is_simulated_and_normalized():
-    engine = MarketEngine(_engine_cfg())
+    engine = MarketEngine(_engine_cfg(greeks_source="calculated"))
     try:
         snap = _run_until_chain(engine)
     finally:
@@ -345,9 +347,11 @@ def test_mock_engine_snapshot_is_simulated_and_normalized():
     assert chain["expiries"] == [chain["expiry"]]
     assert chain["timestamp"].endswith("+05:30")
     row = chain["strikes"][0]
-    for key in ("call_iv", "put_iv", "call_bid", "put_ask", "call_instrument_id"):
-        assert key in row and row[key] is None
-    assert snap["atm"]["method"] == "delta" and snap["atm"]["greeks_source"] == "provider"
+    assert row["call_instrument_id"] is None  # MOCK has no broker security ids
+    for key in ("call_iv", "put_iv", "call_bid", "put_ask", "call_gamma", "put_theta", "call_vega", "call_oi_change"):
+        assert row[key] is not None, key
+    assert chain["greeks_source"] == "calculated"
+    assert snap["atm"]["method"] == "delta" and snap["atm"]["greeks_source"] == "calculated"
     assert set(snap["candles"]) == {"1", "5", "15"}
 
 
@@ -459,9 +463,9 @@ def test_greeks_engine_passes_provider_values_through_and_refuses_unknown_source
     assert isinstance(engine, ProviderGreeksEngine)
     chain = MockDataSource(poll_interval=0.01).get_option_chain()
     before = [(l.call_delta, l.call_iv) for l in chain.strikes]
-    assert [(l.call_delta, l.call_iv) for l in engine.enrich(chain).strikes] == before
-    with pytest.raises(ValueError, match="not implemented"):
-        build_greeks_engine("black_scholes")
+    assert [(l.call_delta, l.call_iv) for l in engine.enrich(chain).strikes] == before  # provider mode never calculates
+    with pytest.raises(ValueError, match="Unknown greeks_source"):
+        build_greeks_engine("magic")
 
 
 def test_atm_falls_back_to_price_when_no_provider_greeks():

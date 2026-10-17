@@ -75,6 +75,10 @@ def serialize_strike_candles(strike: float, builders: dict[str, CandleAggregator
     return {"strike": strike, "by_interval": by_interval}
 
 
+def _oi_change(current: int | None, previous: int | None) -> int | None:
+    return current - previous if current is not None and previous is not None else None
+
+
 def serialize_chain(chain: OptionChainSnapshot | None, atm_strike: float | None) -> dict | None:
     if chain is None:
         return None
@@ -99,6 +103,15 @@ def serialize_chain(chain: OptionChainSnapshot | None, atm_strike: float | None)
                 "call_ask": leg.call_ask,
                 "put_bid": leg.put_bid,
                 "put_ask": leg.put_ask,
+                "call_gamma": leg.call_gamma,
+                "put_gamma": leg.put_gamma,
+                "call_theta": leg.call_theta,
+                "put_theta": leg.put_theta,
+                "call_vega": leg.call_vega,
+                "put_vega": leg.put_vega,
+                # Change since the previous session's close; None unless both numbers exist.
+                "call_oi_change": _oi_change(leg.call_oi, leg.call_oi_prev),
+                "put_oi_change": _oi_change(leg.put_oi, leg.put_oi_prev),
                 "call_instrument_id": leg.call_instrument_id,
                 "put_instrument_id": leg.put_instrument_id,
                 # Same isolated CE+PE formula used everywhere else (MockPriceCalculator._combined_value)

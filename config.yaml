@@ -26,10 +26,15 @@ candle_intervals:
 # UI, ATM, candles, straddle and paper trading don't change between them.
 market_data_provider: mock
 
-# Where Delta/IV come from. "provider" = use what the market data provider
-# supplies (MOCK: simulated Delta, no IV; Dhan: Delta + IV from its option
-# chain). An internal Greeks calculator is not implemented yet.
-greeks_source: provider
+# Where IV / Delta / Gamma / Theta / Vega come from. "provider" = only what the
+# market data provider supplies (Dhan: all five; MOCK: none). "calculated" = the
+# provider's values plus an internal Black-Scholes calculator for whatever is
+# missing (provider values always win; uncomputable values stay empty).
+greeks_source: calculated
+# Inputs to the calculator. The dividend yield is only a fallback: the engine
+# derives the market's own carry from put-call parity when the quotes allow it.
+risk_free_rate: 0.065
+dividend_yield: 0.012
 
 # Order execution backend. Only "paper" (simulation) exists; real broker
 # execution is intentionally not implemented.

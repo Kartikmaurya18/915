@@ -52,6 +52,14 @@ def parse_option_chain(raw: dict, underlying: str) -> OptionChainSnapshot:
                 call_ask=_opt_float(ce.get("askPrice")),
                 put_bid=_opt_float(pe.get("bidprice")),
                 put_ask=_opt_float(pe.get("askPrice")),
+                call_gamma=_opt_float(ce.get("gamma")),
+                put_gamma=_opt_float(pe.get("gamma")),
+                call_theta=_opt_float(ce.get("theta")),
+                put_theta=_opt_float(pe.get("theta")),
+                call_vega=_opt_float(ce.get("vega")),
+                put_vega=_opt_float(pe.get("vega")),
+                call_oi_prev=ce.get("previousOpenInterest"),
+                put_oi_prev=pe.get("previousOpenInterest"),
             )
         )
 
@@ -68,7 +76,13 @@ def parse_option_chain(raw: dict, underlying: str) -> OptionChainSnapshot:
         exchange = None
 
     has_greeks = any(
-        leg.call_delta is not None or leg.put_delta is not None or leg.call_iv is not None or leg.put_iv is not None
+        any(
+            v is not None
+            for v in (
+                leg.call_delta, leg.put_delta, leg.call_iv, leg.put_iv,
+                leg.call_gamma, leg.put_gamma, leg.call_theta, leg.put_theta, leg.call_vega, leg.put_vega,
+            )
+        )
         for leg in strikes
     )
 

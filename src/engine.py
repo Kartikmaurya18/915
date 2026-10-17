@@ -110,7 +110,11 @@ class MarketEngine:
         # provider that can't start (e.g. Dhan without credentials) yields an
         # ERROR-status placeholder so the app/UI still load — never MOCK data.
         self._source = build_provider(self.cfg, fail_soft=True)
-        self._greeks = build_greeks_engine(self.cfg.get("greeks_source", "provider"))
+        self._greeks = build_greeks_engine(
+            self.cfg.get("greeks_source", "provider"),
+            float(self.cfg.get("risk_free_rate", 0.065)),
+            float(self.cfg.get("dividend_yield", 0.012)),
+        )
         self._aggregator = CandleAggregator(
             symbol=self.underlying,
             intervals_minutes=self.intervals,

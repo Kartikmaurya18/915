@@ -22,6 +22,8 @@ OPTION_TYPES = ("CE", "PE")
 # the chain carries no Greeks at all.
 GREEKS_FROM_PROVIDER = "provider"
 GREEKS_CALCULATED = "calculated"
+# The provider sent some Greeks and the internal calculator derived the rest.
+GREEKS_MIXED = "provider+calculated"
 
 
 @dataclass
@@ -97,6 +99,17 @@ class OptionLeg:
     put_ask: Optional[float] = None
     call_instrument_id: Optional[str] = None
     put_instrument_id: Optional[str] = None
+    # Second-order Greeks (theta per calendar day, vega per volatility point) and the previous
+    # session's open interest, so the change since yesterday's close can be shown. All None unless
+    # a provider sent them or the internal calculator derived them (see option_chain/greeks.py).
+    call_gamma: Optional[float] = None
+    put_gamma: Optional[float] = None
+    call_theta: Optional[float] = None
+    put_theta: Optional[float] = None
+    call_vega: Optional[float] = None
+    put_vega: Optional[float] = None
+    call_oi_prev: Optional[int] = None
+    put_oi_prev: Optional[int] = None
 
     def ltp(self, option_type: str) -> float:
         return self.call_ltp if option_type.upper() == "CE" else self.put_ltp
