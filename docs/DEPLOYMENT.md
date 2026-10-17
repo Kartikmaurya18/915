@@ -102,10 +102,12 @@ Configuration is in [production.env.template](../deploy/production.env.template)
 
 ## Verified, and not
 
-| Verified locally | Not verified |
+| Verified locally (Docker Desktop on a Windows laptop) | Not verified |
 |---|---|
-| Whole test suites against PostgreSQL 16 and Redis 7 in Docker (Phases 1–2); live end-to-end against a real server; headless-Chrome run of the web app | Any cloud provider, managed Postgres/Redis, TLS termination, a real load balancer |
-| Single-gateway capacity ([CAPACITY.md](CAPACITY.md)) | Several gateways behind a load balancer; behaviour under real network conditions |
-| Backup script guards and syntax | An actual `pg_dump`/restore at production volume; the provider's snapshot/PITR restore |
-| Alert expressions match real metric names | Alerts firing in a live Prometheus; the thresholds' fit to real traffic |
-| Failover, fencing, history and push notices in tests | A real data provider; market hours with real ticks |
+| Image builds (Node + Python stages); entrypoints import; runs as a non-root user | Any cloud provider, managed PostgreSQL/Redis, TLS termination, a real load balancer |
+| Compose topology: 2 ingestors, 2 gateways, Redis, PostgreSQL 16; migrations including `0002` | GitHub Actions (nothing is pushed, so the workflow has never run) |
+| `scripts/verify_stack.py`: 14 end-to-end checks (cross-gateway push through Redis, automatic-exit notice, failover in ~6 s with the in-progress candle continued, history through the new leader) | Behaviour with more than two gateways, or on dedicated Linux hardware |
+| Full backend suite against real PostgreSQL 16 and Redis 7; live end-to-end tests against the gateways; headless Chrome against the gateways | Real market data and market hours; a real data provider |
+| Capacity of two containerized gateways ([CAPACITY.md](CAPACITY.md)): 1,500 clients at a 1 tick/s feed | Safari, Firefox, real phones, screen readers |
+| Backup and restore drill on PostgreSQL 16; the importer on real PostgreSQL with real history | A restore from a provider's own snapshot or PITR; restore time at production data volume |
+| Alert expressions match real metric names and label values | Alerts firing in a live Prometheus; the thresholds' fit to real traffic |
