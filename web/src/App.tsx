@@ -11,6 +11,7 @@ import { AuthPage } from "./pages/AuthPage";
 const Overview = lazy(() => import("./pages/Overview"));
 const Trading = lazy(() => import("./pages/Trading"));
 const Strategy = lazy(() => import("./pages/Strategy"));
+const Workspace = lazy(() => import("./pages/Workspace"));
 const History = lazy(() => import("./pages/History"));
 const Rrg = lazy(() => import("./pages/Rrg"));
 const Quality = lazy(() => import("./pages/Quality"));
@@ -41,6 +42,7 @@ export function App() {
               <Route index element={<Overview />} />
               <Route path="trading" element={<Trading />} />
               <Route path="strategy" element={<Strategy />} />
+              <Route path="workspace" element={<Workspace />} />
               <Route path="history" element={<History />} />
               <Route path="rrg" element={<Rrg />} />
               <Route path="quality" element={<Quality />} />

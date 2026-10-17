@@ -1,3 +1,5 @@
+import { FeedBanner } from "./FeedBanner";
+import { Shortcuts } from "./Shortcuts";
 import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { ChevronDown, LogOut, Monitor, Moon, Search, Sun, TrendingUp } from "lucide-react";
@@ -70,7 +72,7 @@ export function Layout() {
                 end={n.to === "/"}
                 className={({ isActive }) =>
                   cn(
-                    "inline-flex min-h-9 items-center rounded-control px-3 text-sm font-medium transition-colors",
+                    "inline-flex min-h-9 items-center whitespace-nowrap rounded-control px-2 text-sm font-medium transition-colors 2xl:px-3",
                     isActive ? "bg-brand-soft text-brand-fg" : "text-muted hover:bg-surface-2 hover:text-fg",
                   )
                 }
@@ -86,7 +88,7 @@ export function Layout() {
               onClick={openPalette}
               title="Search and commands"
               aria-keyshortcuts="Control+K Meta+K"
-              className="flex min-h-9 items-center gap-2 rounded-control border border-control bg-surface px-2.5 text-sm text-muted transition-colors hover:border-fg/40 hover:text-fg sm:min-w-52"
+              className="flex min-h-9 items-center gap-2 rounded-control border border-control bg-surface px-2.5 text-sm text-muted transition-colors hover:border-fg/40 hover:text-fg sm:min-w-52 xl:min-w-40 2xl:min-w-52"
             >
               <Search aria-hidden="true" className="size-4" />
               <span className="sr-only sm:hidden">Search</span>
@@ -110,6 +112,7 @@ export function Layout() {
 
       <main id="main" ref={mainRef} tabIndex={-1} className="mx-auto w-full max-w-7xl flex-1 px-3 pb-24 pt-4 outline-none sm:px-5 xl:pb-10 xl:pt-6">
         <div className="grid gap-4 xl:gap-5">
+          <FeedBanner />
           <Outlet />
         </div>
       </main>
@@ -137,6 +140,7 @@ export function Layout() {
         </ul>
       </nav>
 
+      <Shortcuts />
       <Suspense fallback={null}>
         {paletteLoaded && <CommandPalette />}
         {orderLoaded && <OrderDrawer />}

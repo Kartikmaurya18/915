@@ -7,8 +7,10 @@ import {
   type ColumnDef, type ColumnKey, type Side, type Sort, type Window,
 } from "../lib/chain";
 import { fmt, fmtInt } from "../lib/format";
+import { addItem } from "../lib/watchlist";
 import { selectionKey } from "../state/selection";
 import { useSelection } from "../state/SelectionContext";
+import { useWatchlists } from "../state/useWatchlists";
 import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
 import { Card } from "../ui/Card";
@@ -119,6 +121,7 @@ const WINDOWS = [
 export function OptionChainCard({ options, atm, loading }: { options: OptionsTopic | undefined; atm: number | null; loading: boolean }) {
   const sel = useSelection();
   const { openOrder } = useUI();
+  const { state: watch, update: updateWatch } = useWatchlists();
   const [win, setWin] = useState<Window>(6);
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<Sort>(DEFAULT_SORT);
@@ -136,6 +139,18 @@ export function OptionChainCard({ options, atm, loading }: { options: OptionsTop
   const onPick = useCallback((strike: number, optionType: "CE" | "PE") => toggle({ strike, optionType, expiry, underlying }), [toggle, expiry, underlying]);
   const onTrade = useCallback((strike: number) => openOrder({ strike, optionType: "CE" }), [openOrder]);
   const count = sel.selection.size;
+
+  function watchSelected() {
+    updateWatch((w) => {
+      let next = w;
+      for (const e of sel.selection.values()) {
+        const row = options?.strikes.find((r) => r.strike === e.strike);
+        const price = row ? (e.optionType === "CE" ? row.call_ltp : row.put_ltp) : null;
+        next = addItem(next, w.active, { kind: "option", underlying: e.underlying ?? underlying ?? "", strike: e.strike, optionType: e.optionType, expiry: e.expiry ?? expiry, addedPrice: price });
+      }
+      return next;
+    });
+  }
 
   function toggleColumn(key: ColumnKey) {
     if (key === "ltp") return; // the price is what you select, so it always stays
@@ -168,6 +183,7 @@ export function OptionChainCard({ options, atm, loading }: { options: OptionsTop
       actions={
         count > 0 && (
           <>
+            <Button size="sm" onClick={watchSelected} title={`Add the selected contracts to "${watch.lists.find((l) => l.id === watch.active)?.name}"`}>Watch</Button>
             <Button size="sm" onClick={sel.clear}>Clear</Button>
             <Link to="/trading" className="inline-flex min-h-8 items-center gap-1.5 rounded-control bg-brand px-3 text-sm font-medium text-on-brand hover:brightness-110">
               Trade {count} selected <ArrowRight aria-hidden="true" className="size-4" />
