@@ -41,7 +41,7 @@ describe("handshake and subscriptions", () => {
     const ws = FakeSocket.last;
     ws.open();
     expect(ws.sent[0]).toEqual({ type: "auth", token: "tok-1" });
-    expect(ws.sent[1]).toEqual({ type: "subscribe", topics: ["index:NIFTY"] });
+    expect(ws.sent[1]).toEqual({ type: "subscribe", topics: ["index:NIFTY"], batch: true });
     expect(ws.url).not.toContain("tok-1"); // never in the URL
   });
 
@@ -191,7 +191,7 @@ describe("reconnection", () => {
     const second = FakeSocket.last;
     second.open();
     expect(second.sent[0]).toEqual({ type: "auth", token: "tok-1" });
-    expect(second.sent[1]).toEqual({ type: "subscribe", topics: ["index:NIFTY"] });
+    expect(second.sent[1]).toEqual({ type: "subscribe", topics: ["index:NIFTY"], batch: true });
     second.receive({ type: "hello", heartbeat_s: 15, max_topics: 16 });
     expect(client.getInfo().status).toBe("live");
     second.receive(snapshot("index:NIFTY", 9, { v: 9 }));
@@ -281,5 +281,60 @@ describe("paper change notices", () => {
     ws.receive({ type: "paper_changed" });
     expect(client.getTopic("index:NIFTY")).toBeUndefined();
     expect(client.getInfo().resyncs).toBe(0);
+  });
+});
+
+describe("batch frames", () => {
+  it("always asks the server for batching when subscribing", () => {
+    const { client } = make();
+    const ws = connect(client);
+    client.subscribe("options:NIFTY", () => undefined);
+    expect(ws.sent.at(-1)).toEqual({ type: "subscribe", topics: ["options:NIFTY"], batch: true });
+  });
+
+  it("applies every frame inside a batch, in order, as if each had arrived alone", () => {
+    const { client } = make();
+    const ws = connect(client);
+    const seen: string[] = [];
+    for (const t of ["index:NIFTY", "options:NIFTY"]) client.subscribe(t, () => seen.push(t));
+    ws.receive({ type: "batch", frames: [snapshot("index:NIFTY", 1, { price: 100 }), snapshot("options:NIFTY", 1, { strikes: [] })] });
+    expect(client.getTopic("index:NIFTY")?.data).toEqual({ price: 100 });
+    expect(client.getTopic("options:NIFTY")?.data).toEqual({ strikes: [] });
+    ws.receive({ type: "batch", frames: [patch("index:NIFTY", 2, 1, ["d", { price: 101 }, []]), patch("options:NIFTY", 2, 1, ["d", { strikes: ["=", [1]] }, []])] });
+    expect(client.getTopic("index:NIFTY")?.data).toEqual({ price: 101 });
+    expect(client.getTopic("options:NIFTY")?.data).toEqual({ strikes: [1] });
+    expect(seen).toEqual(["index:NIFTY", "options:NIFTY", "index:NIFTY", "options:NIFTY"]);
+    expect(client.getInfo()).toMatchObject({ snapshots: 2, patches: 2, resyncs: 0 });
+  });
+
+  it("counts a batch as one message on the wire", () => {
+    const { client } = make();
+    const ws = connect(client);
+    client.subscribe("index:NIFTY", () => undefined);
+    const before = client.getInfo().frames;
+    ws.receive({ type: "batch", frames: [snapshot("index:NIFTY", 1, { a: 1 }), { type: "heartbeat", t: 1, feed_age_ms: 7 }] });
+    expect(client.getInfo().frames).toBe(before + 1);
+    expect(client.getInfo().feedAgeMs).toBe(7); // other frame types inside a batch are handled too
+  });
+
+  it("a gap inside a batch triggers a resync for that topic only", () => {
+    const { client } = make();
+    const ws = connect(client);
+    client.subscribe("index:NIFTY", () => undefined);
+    client.subscribe("options:NIFTY", () => undefined);
+    ws.receive({ type: "batch", frames: [snapshot("index:NIFTY", 1, { v: 1 }), snapshot("options:NIFTY", 1, { v: 1 })] });
+    ws.receive({ type: "batch", frames: [patch("index:NIFTY", 9, 8, ["d", { v: 9 }, []]), patch("options:NIFTY", 2, 1, ["d", { v: 2 }, []])] });
+    expect(ws.sent.filter((m) => m.type === "resync")).toEqual([{ type: "resync", topic: "index:NIFTY" }]);
+    expect(client.getTopic("options:NIFTY")?.data).toEqual({ v: 2 });
+    expect(client.getTopic("index:NIFTY")?.data).toEqual({ v: 1 });
+  });
+
+  it("ignores a malformed batch without breaking the connection", () => {
+    const { client } = make();
+    const ws = connect(client);
+    ws.receive({ type: "batch" });
+    ws.receive({ type: "batch", frames: [null, 5, "x", { type: "heartbeat", t: 1, feed_age_ms: 3 }] });
+    expect(client.getInfo().status).toBe("live");
+    expect(client.getInfo().feedAgeMs).toBe(3);
   });
 });

@@ -32,11 +32,13 @@ export interface OtherMsg {
   type: "subscribed" | "unsubscribed" | "auth_ok" | "pong" | "rate_limited" | "paper_changed";
   [key: string]: unknown;
 }
-export type ServerMsg = SnapshotMsg | PatchMsg | HelloMsg | HeartbeatMsg | ErrorMsg | OtherMsg;
+/** Several topic updates of one tick in a single message (only sent to clients that asked with `batch: true`). */
+export interface BatchMsg { type: "batch"; frames: ServerMsg[] }
+export type ServerMsg = SnapshotMsg | PatchMsg | HelloMsg | HeartbeatMsg | ErrorMsg | OtherMsg | BatchMsg;
 
 export type ClientMsg =
   | { type: "auth"; token: string }
-  | { type: "subscribe"; topics: string[] }
+  | { type: "subscribe"; topics: string[]; batch?: boolean }
   | { type: "unsubscribe"; topics: string[] }
   | { type: "resync"; topic: string }
   | { type: "ping" };

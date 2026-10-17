@@ -83,7 +83,7 @@ lease steps down after about 0.8 of a TTL, so automatic take-profit and stop-los
 
 *Alerts: SlowFanOut, ManySnapshotsInsteadOfPatches, ManyClientsDropped.*
 
-A gateway is a single asyncio process; about 500 clients at a 4 Hz feed is its comfortable ceiling (see CAPACITY.md).
+A gateway is a single asyncio process and saturates one core. In testing, two gateways carried 1,500 clients at a 1 tick/s feed but only about 500 comfortably at 4 ticks/s (see CAPACITY.md); the ceiling depends on your feed rate.
 
 1. Add gateway replicas behind the load balancer. They are stateless; no coordination is needed.
 2. If you cannot, lower the tick rate (`POLL_INTERVAL_SECONDS`), which divides the per-client traffic.

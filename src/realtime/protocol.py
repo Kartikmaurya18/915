@@ -11,9 +11,12 @@ Server -> client
     error       {code, message, topic?}
     rate_limited {retry_after_s}
 
+    batch       {frames: [snapshot|patch, ...]}   only if the client asked for it (subscribe with batch=true):
+                                          all topic updates of one tick in a single message
+
 Client -> server
     auth        {token}                  first frame when auth is required
-    subscribe   {topics}   unsubscribe {topics}
+    subscribe   {topics, batch?}   unsubscribe {topics}      batch=true opts in to `batch` frames
     resync      {topic}                  request a fresh snapshot (e.g. after a gap)
     ping        {}
 
@@ -47,6 +50,13 @@ def snapshot_message(topic: str, epoch: int, seq: int, ts: int, pub: int, data: 
 
 def patch_message(topic: str, epoch: int, seq: int, base: int, ts: int, pub: int, patch: Any) -> str:
     return dumps({"v": VERSION, "type": "patch", "topic": topic, "epoch": epoch, "seq": seq, "base": base, "ts": ts, "pub": pub, "patch": patch})
+
+
+def batch_message(frames: list[str]) -> str:
+    """Several already-serialised frames in ONE websocket message, in order. Concatenated rather than
+    re-encoded, so building it costs nothing per topic; a client unpacks and handles each inner frame
+    exactly as if it had arrived on its own."""
+    return '{"v":%d,"type":"batch","frames":[%s]}' % (VERSION, ",".join(frames))
 
 
 def control_message(type_: str, **fields: Any) -> str:

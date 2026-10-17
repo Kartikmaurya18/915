@@ -15,6 +15,7 @@ import {
   CLOSE_AUTH,
   CLOSE_CAPACITY,
   parseServerMessage,
+  type BatchMsg,
   type ClientMsg,
   type PatchMsg,
   type ServerMsg,
@@ -137,7 +138,7 @@ export class RealtimeClient {
     set.add(listener);
     const count = (this.refs.get(topic) ?? 0) + 1;
     this.refs.set(topic, count);
-    if (count === 1 && this.isOpen()) this.send({ type: "subscribe", topics: [topic] });
+    if (count === 1 && this.isOpen()) this.send({ type: "subscribe", topics: [topic], batch: true });
     let active = true;
     return () => {
       if (!active) return;
@@ -219,7 +220,7 @@ export class RealtimeClient {
       this.send({ type: "auth", token });
     }
     const topics = [...this.refs.keys()];
-    if (topics.length) this.send({ type: "subscribe", topics });
+    if (topics.length) this.send({ type: "subscribe", topics, batch: true }); // one message per tick, not one per topic
     this.startWatchdog();
   }
 
@@ -301,6 +302,17 @@ export class RealtimeClient {
       this.emitInfo();
       return;
     }
+    if (msg.type === "batch") {
+      const inner = (msg as BatchMsg).frames;
+      if (Array.isArray(inner)) for (const frame of inner) if (frame && typeof frame === "object") this.dispatch(frame, at);
+      this.emitInfo();
+      return;
+    }
+    this.dispatch(msg, at);
+  }
+
+  /** Handle one logical frame, whether it arrived alone or inside a batch. */
+  private dispatch(msg: ServerMsg, at: number): void {
     switch (msg.type) {
       case "hello":
         this.backoff = INITIAL_BACKOFF_MS;

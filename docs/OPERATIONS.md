@@ -23,6 +23,7 @@ against a local PostgreSQL 16 container, **not** against a cloud provider.
 | `WS_MAX_CONNECTIONS_PER_USER`, `WS_MAX_CONNECTIONS_TOTAL` | Per-account and per-process WebSocket caps. |
 | `RATE_LIMIT_BACKEND` | `auto` (default: Redis when `REDIS_URL` is set), `redis` or `memory`. With Redis the login/registration limits are shared by every gateway; if Redis is unreachable the limiter falls back to per-process counters and recovers by itself (metric `rate_limit_backend_errors_total`). |
 | `MARKET_HISTORY_BACKEND` | `sql` stores candles and ATM snapshots in the shared database (default when `AUTH_MODE=required` and `DATABASE_URL` is set); `sqlite` keeps the original local file (default for local development). |
+| `RT_BATCH_WINDOW_MS` | How long a batching client waits so one tick's topics go out in one message (default 4). `0` disables the wait. |
 | `FRONTEND` | `spa` (default when `web/dist` exists) serves the React app; `legacy` serves the original single-file UI from `public/`. |
 | `TRUSTED_PROXY_HOPS` | Reverse proxies in front of the app. `0` ignores `X-Forwarded-For` (rate limits then see the proxy's IP, so set this correctly behind a load balancer). |
 

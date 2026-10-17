@@ -72,7 +72,7 @@ async def one_client(i, total, args, token, stats, deadline, verify):
             if token:
                 await ws.send(json.dumps({"type": "auth", "token": token}))
             if not args.legacy:
-                await ws.send(json.dumps({"type": "subscribe", "topics": topics}))
+                await ws.send(json.dumps({"type": "subscribe", "topics": topics, **({"batch": True} if args.batch else {})}))
             stats["connected"] += 1
             while time.time() < deadline:
                 try:
@@ -82,40 +82,45 @@ async def one_client(i, total, args, token, stats, deadline, verify):
                 now_ms = time.time() * 1000
                 stats["frames"] += 1
                 stats["bytes"] += len(raw)
-                # A client's FIRST frame per topic is the stored state, whose age is "time since that
-                # topic last changed", not a delivery delay - leave it out of the latency figures.
-                topic_match = TOPIC.search(raw) if not args.legacy else None
-                key = topic_match.group(1) if topic_match else "legacy"
-                initial = key not in seen_keys
-                seen_keys.add(key)
-                match = PUB.search(raw)
-                if match and not initial:
-                    latencies.append(now_ms - int(match.group(1)))
-                # Source latency: from the tick being created to this client receiving it. It is the
-                # one number comparable between the legacy stream and /ws/v1.
-                if initial:
-                    pass
-                elif args.legacy:
-                    legacy = LEGACY_TS.search(raw)
-                    if legacy:
-                        stats["source"].append(now_ms - datetime.fromisoformat(legacy.group(1)).timestamp() * 1000)
-                else:
-                    source = TS.search(raw)
-                    if source:
-                        stats["source"].append(now_ms - int(source.group(1)))
-                if raw.startswith('{"v":1,"type":"patch"'):
-                    stats["patches"] += 1
-                    sizes["patch"].append(len(raw))
-                elif raw.startswith('{"v":1,"type":"snapshot"'):
-                    stats["snapshots"] += 1
-                    sizes["snapshot"].append(len(raw))
-                elif args.legacy:
-                    sizes["legacy"].append(len(raw))
-                if mirror is not None and not args.legacy and raw.startswith('{"v":1,"type":"'):
-                    frame = json.loads(raw)
-                    if frame["type"] in ("snapshot", "patch") and mirror.apply(frame) == "resync":
-                        stats["resyncs"] += 1
-                        await ws.send(json.dumps({"type": "resync", "topic": frame["topic"]}))
+                parts = [raw]
+                if args.batch and raw.startswith('{"v":1,"type":"batch"'):
+                    # One websocket message carrying several topic updates: unpack and account for each.
+                    parts = [json.dumps(inner, separators=(",", ":")) for inner in json.loads(raw)["frames"]]
+                for raw in parts:
+                    # A client's FIRST frame per topic is the stored state, whose age is "time since that
+                    # topic last changed", not a delivery delay - leave it out of the latency figures.
+                    topic_match = TOPIC.search(raw) if not args.legacy else None
+                    key = topic_match.group(1) if topic_match else "legacy"
+                    initial = key not in seen_keys
+                    seen_keys.add(key)
+                    match = PUB.search(raw)
+                    if match and not initial:
+                        latencies.append(now_ms - int(match.group(1)))
+                    # Source latency: from the tick being created to this client receiving it. It is the
+                    # one number comparable between the legacy stream and /ws/v1.
+                    if initial:
+                        pass
+                    elif args.legacy:
+                        legacy = LEGACY_TS.search(raw)
+                        if legacy:
+                            stats["source"].append(now_ms - datetime.fromisoformat(legacy.group(1)).timestamp() * 1000)
+                    else:
+                        source = TS.search(raw)
+                        if source:
+                            stats["source"].append(now_ms - int(source.group(1)))
+                    if raw.startswith('{"v":1,"type":"patch"'):
+                        stats["patches"] += 1
+                        sizes["patch"].append(len(raw))
+                    elif raw.startswith('{"v":1,"type":"snapshot"'):
+                        stats["snapshots"] += 1
+                        sizes["snapshot"].append(len(raw))
+                    elif args.legacy:
+                        sizes["legacy"].append(len(raw))
+                    if mirror is not None and not args.legacy and raw.startswith('{"v":1,"type":"'):
+                        frame = json.loads(raw)
+                        if frame["type"] in ("snapshot", "patch") and mirror.apply(frame) == "resync":
+                            stats["resyncs"] += 1
+                            await ws.send(json.dumps({"type": "resync", "topic": frame["topic"]}))
                 if slow:
                     await asyncio.sleep(args.slow_delay)  # a client that drains its socket slowly
             stats["completed"] += 1
@@ -272,6 +277,7 @@ def main() -> int:
     parser.add_argument("--ramp", type=float, default=3, help="seconds over which clients connect")
     parser.add_argument("--processes", type=int, default=max(1, min(6, (mp.cpu_count() or 2) - 1)))
     parser.add_argument("--legacy", action="store_true", help="baseline: the original single-blob /ws")
+    parser.add_argument("--batch", action="store_true", help="opt in to batch frames (all topic updates of a tick in one message)")
     parser.add_argument("--token", default=None)
     parser.add_argument("--register", type=int, default=0, help="register N users and spread clients over them")
     parser.add_argument("--slow-fraction", type=float, default=0.0)

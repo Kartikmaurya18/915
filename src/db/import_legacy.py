@@ -59,7 +59,8 @@ def import_history(sqlite_path: str | Path) -> dict[str, int]:
             for rows in _chunks(cursor):
                 with session_scope() as session:
                     stmt = _insert(session, MarketCandle).values([dict(r) for r in rows]).on_conflict_do_nothing()
-                    added["candles"] += session.execute(stmt).rowcount or 0
+                    # RETURNING, not rowcount: PostgreSQL's driver reports -1 for a multi-row insert.
+                    added["candles"] += len(session.execute(stmt.returning(MarketCandle.symbol)).all())
 
         if _has_table(src, "option_chain_snapshots"):
             with session_scope() as session:
@@ -81,7 +82,7 @@ def import_history(sqlite_path: str | Path) -> dict[str, int]:
             for rows in _chunks(cursor):
                 with session_scope() as session:
                     stmt = _insert(session, LegacyPaperTrade).values([dict(r) for r in rows]).on_conflict_do_nothing()
-                    added["legacy_paper_trades"] += session.execute(stmt).rowcount or 0
+                    added["legacy_paper_trades"] += len(session.execute(stmt.returning(LegacyPaperTrade.id)).all())
     finally:
         src.close()
     return added

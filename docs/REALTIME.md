@@ -42,7 +42,18 @@ See `src/realtime/protocol.py` for the authoritative frame list. In short: the c
 if it holds exactly that version; otherwise it sends `resync` and gets a fresh snapshot.
 `heartbeat` frames report `feed_age_ms`, so a client can show "feed down" even when no data flows.
 
-A reference client state machine is `src/realtime/client.py`; port it line-for-line to the browser.
+A reference client state machine is `src/realtime/client.py`; the browser's is `web/src/realtime/client.ts`.
+
+### Batching and per-user notices
+
+A client may send `subscribe {topics, batch: true}`. From then on, the topic updates that are due at the same moment (one tick
+touches `index`, `options` and `candles`) arrive in **one** message, `{"type":"batch","frames":[…]}`, whose inner frames are the
+ordinary `snapshot` / `patch` frames in order. The gateway waits `RT_BATCH_WINDOW_MS` (default 4 ms) after waking a batching client so the
+rest of the tick can join. Clients that do not opt in receive exactly what they always did. `batch` must be the JSON value `true`.
+
+`paper_changed` is a data-free notice sent only to the sockets of the user whose paper book changed (an order, a close, a settings change,
+or an automatic take-profit/stop-loss exit decided by the ingestor). It travels over Redis (`{prefix}user:<id>`) so it reaches the user's
+sockets on every gateway. At most one is ever queued per socket; the browser refetches its book over authenticated REST.
 
 ### Ordering and duplicates
 
@@ -101,8 +112,12 @@ across ingestor hosts until market history moves to PostgreSQL.
 
 ## Known limits
 
-* In-progress candle state lives in the leader's memory; a failover restarts the current candle on the new leader.
+* The in-progress candle is carried over to a new leader from the last published `candles:` topic, and today's completed candles are
+  restored from history; ticks the old leader saw after its last publish are lost, and the live per-strike straddle series restarts.
 * Redis is a single instance in this setup; Redis itself is a single point of failure for *new* data (existing
   connections keep serving the last state). Use a managed Redis with replication for production.
 * The legacy single-blob `/ws` still exists (embedded mode only) for the old UI; it is not offered by gateways.
-* The legacy history store is still SQLite on the ingestor's disk (see the control-channel note).
+* Market history is in the shared database when `MARKET_HISTORY_BACKEND=sql` (the default for a signed-in deployment with `DATABASE_URL`);
+  the control channel still serves it, with a short read cache on the gateway.
+* Run the server with `--ws-per-message-deflate false` (the image does): per-client compression cost about a quarter of a gateway's CPU for
+  negligible bandwidth. See [CAPACITY.md](CAPACITY.md).

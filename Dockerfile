@@ -32,4 +32,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4).status == 200 else 1)"
 
 # --ws-max-size caps inbound WebSocket frames (clients only ever send a tiny auth frame).
-CMD ["uvicorn", "src.api.server:app", "--host", "0.0.0.0", "--port", "8000", "--ws-max-size", "65536"]
+# --ws-per-message-deflate false: by default every outgoing message is compressed separately for every client,
+# which costs a quarter of a gateway's CPU (measured: docs/CAPACITY.md) to save bandwidth that is already tiny
+# (about 9 KB/s per client). Turn it back on at the load balancer if bandwidth ever matters more than CPU.
+CMD ["uvicorn", "src.api.server:app", "--host", "0.0.0.0", "--port", "8000", "--ws-max-size", "65536", "--ws-per-message-deflate", "false"]

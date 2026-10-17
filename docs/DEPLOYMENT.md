@@ -32,7 +32,7 @@ Vercel serverless**: it needs long-lived WebSocket connections, a background ing
 
 | Component | Command | Count | Notes |
 |---|---|---|---|
-| Gateway | `uvicorn src.api.server:app --host 0.0.0.0 --port 8000 --ws-max-size 65536` with `REALTIME_MODE=gateway` | **2+**, scale on load | Stateless. Serves the web app, REST and WebSockets. About 400 clients each at a 4 Hz feed ([CAPACITY.md](CAPACITY.md)). |
+| Gateway | `uvicorn src.api.server:app --host 0.0.0.0 --port 8000 --ws-max-size 65536 --ws-per-message-deflate false` with `REALTIME_MODE=gateway` (the image's default command) | **3 for 1,000 users**, scale on load | Stateless. Serves the web app, REST and WebSockets. Two containerized gateways carried 1,500 clients at a 1 tick/s feed in testing; see [CAPACITY.md](CAPACITY.md) for what was and was not measured. |
 | Ingestor | `python -m src.ingestor` | **2** (one leads, one stands by) | The only process that talks to the data provider; also runs the take-profit/stop-loss exit worker. Serves no users. |
 | Redis | any Redis 7 | 1 | No persistence needed (`--save "" --appendonly no`). Private network, password, ideally TLS. |
 | PostgreSQL | 16 | 1 managed | The only durable store. Enable provider backups and point-in-time recovery. |
@@ -49,6 +49,12 @@ The image builds the web app and the Python service together (`docker build .`);
 4. **Gateways** next, one at a time behind the load balancer. Sockets reconnect and resubscribe by themselves.
 5. **Verify**: `GET /api/ready` is 200 on every gateway; the `NoIngestorLeader` alert is quiet; sign in, place and close a simulated order.
 6. **Create the first admin** out of band: `python -m src.auth.cli make-admin you@example.com`.
+
+**Verifying a deployment.** [scripts/verify_stack.py](../scripts/verify_stack.py) exercises the whole topology end to end and exits non-zero on any failure. It checks that both gateways serve
+the same epoch, that a paper-book change on gateway 1 reaches the user's socket on gateway 2 (Redis pub/sub), that the ingestor's automatic take-profit/stop-loss exit reaches the user,
+that killing the leading ingestor fails over with a new epoch while the in-progress candle continues, and that history answers through the new leader. It was written for the local
+Compose stack (`docker compose -p <project> up -d --build`, then `python scripts/verify_stack.py --project <project>`); to point it at a real deployment, give it the two gateway URLs and
+adapt the two `docker compose` calls that stop and start the leader.
 
 Configuration is in [production.env.template](../deploy/production.env.template); every variable is explained in
 [OPERATIONS.md](OPERATIONS.md#configuration).

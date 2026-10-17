@@ -773,6 +773,8 @@ def _handle_client_frame(session, frame: object) -> None:
         for topic, message in errors:
             session.queue_control(rt_protocol.error_message("bad_topic", message, topic or None))
         if kind == "subscribe":
+            if frame.get("batch") is True:
+                session.batch = True  # this client unpacks `batch` frames; others never receive them
             done = session.subscribe(valid)
             session.queue_control(rt_protocol.control_message("subscribed", topics=done))
         else:

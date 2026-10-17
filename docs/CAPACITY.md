@@ -1,74 +1,88 @@
-# Capacity: what one gateway process can serve
+# Capacity: what a gateway can serve
 
-Measured 2026-10-17 with [scripts/loadtest_ws.py](../scripts/loadtest_ws.py). These numbers are a floor,
-not a promise: read the caveats before using them to size anything.
+Measured 2026-10-17 with [scripts/loadtest_ws.py](../scripts/loadtest_ws.py). **These are laptop numbers with the load generator on the same
+machine. Treat them as a floor and as a way to compare changes, not as a promise for production hardware.** Read the caveats.
 
-## Setup
+## What was measured
 
 | | |
 |---|---|
-| Machine | AMD Ryzen 5 5500U (6 cores / 12 threads), Windows 11, other containers stopped |
-| Server | **one** `uvicorn src.api.server:app` process, embedded mode, `AUTH_MODE=disabled`, mock feed at **4 ticks/s** |
-| Load generator | 3–4 Python processes on **the same machine**, so it competes with the server for CPU |
-| Clients | realistic mix: 60% option chain (`index` + `options`), 25% chart (`index` + `candles`), 15% dashboard (`index`) |
-| Duration | 30 s of steady traffic per run, after a ramp |
+| Machine | AMD Ryzen 5 5500U (6 cores / 12 threads), Windows 11, about 1 GB of free RAM; other containers (a Kubernetes control plane using 35–240 % CPU) running during the Docker runs |
+| Native runs | **one** `uvicorn` process on Windows, embedded mode, `AUTH_MODE=disabled`, mock feed |
+| Docker runs | the compose topology: 2 gateways, 2 ingestors, Redis, PostgreSQL (`AUTH_MODE=required`), Docker Desktop (WSL2) |
+| Feed | **4 ticks/s** (fast; stress) and **1 tick/s** (nearer a real provider's option-chain rate) |
+| Clients | 60 % option chain (`index` + `options`), 25 % chart (`index` + `candles`), 15 % dashboard (`index`) |
+| Duration | 30 s of steady traffic per run |
 
-Latency is `receive time − frame.pub` (the ingestor's publish time) on one clock, so it includes the generator's own
-scheduling delay. It over-states what a user on a separate machine would see.
+Latency is `receive time − the ingestor's publish time` on one clock, so it includes the generator's own scheduling delay (it shares the CPU).
 
-## Results
+## Two changes that mattered, found by measuring
 
-| Clients | Connected | Frames/s | Latency p50 / p95 / p99 | Server CPU | Full snapshots sent | Resyncs |
-|---:|---:|---:|---|---:|---:|---:|
-| 100 | 100 | 727 | fan-out p50 25 ms (end-to-end latency not captured) | – | 0 | 0 |
-| 300 | 300 | 2,379 | 91 / 141 / 200 ms | – | 555 | 0 |
-| 500 | 500 | 4,362 | 147 / 248 / 336 ms | **73 % of one core** | 925 | 0 |
-| 600 | 600 | 4,792 | 199 / 321 / 383 ms | – | 1,110 | 0 |
-| 1,000 | **853** (113 refused, 34 timed out) | 8,298 | 343 / 542 / 633 ms | **85 % of one core** | 22,932 | 0 |
+1. **WebSocket compression was costing a quarter of the CPU.** By default uvicorn compresses every outgoing message separately for every client (permessage-deflate).
+   Per-client traffic is only ~9 KB/s, so the bandwidth saved is negligible. The image now starts with `--ws-per-message-deflate false`.
+2. **Batching.** A client with several topics used to receive one WebSocket message per topic per tick. Clients can now opt in (`subscribe` with `batch: true`; the web app does)
+   and get all of a tick's topic updates in one message, after a 4 ms collection window (`RT_BATCH_WINDOW_MS`). Clients that do not opt in behave exactly as before.
 
-Memory grew from about 100 MB (100 clients) to about 200 MB (1,000 clients). Each client costs roughly 0.1 MB.
-Average patch frame: ~1.15 KB. Average full snapshot: ~2.6 KB. Per-client bandwidth: ~9 KB/s at 4 ticks/s.
-No client ever had to resync (0 resyncs in the 300, 500, 600 and 1,000-client runs). In each run 15–38 clients parsed every frame fully and applied every patch cleanly; the generator counts resyncs but does not separately assert state equality (that is covered by the live end-to-end tests).
+Native, 500 clients, 4 ticks/s, one process. "Before" is the average of two runs; the other rows are single runs. The machine was busier than during the first capacity test, so absolute values are worse than the 336 ms p99 first seen at this size; compare rows with each other, not with that figure:
+
+| Configuration | Messages/s | Latency p50 / p95 / p99 | Server CPU | Catch-up snapshots |
+|---|---:|---|---:|---:|
+| Before (compression on, no batching) | 3,650 | 187 / 613 / 832 ms | 73 % of a core | ~14,500 |
+| Compression off | 3,870 | 124 / 473 / 745 ms | 56 % | 3,559 |
+| Compression off **and** batching | 2,156 | **86 / 292 / 621 ms** | 54 % | 5,725 |
+
+## Two gateways in Docker (the production shape), before and after the two changes
+
+Clients are split evenly across the two gateways. "Connected" is out of the clients requested; the rest timed out connecting.
+
+| Feed | Clients | Before: connected, latency p50 / p99, gateway CPU | After: connected, latency p50 / p99, gateway CPU |
+|---|---:|---|---|
+| 1 tick/s | 500 | 500, 160 ms / 1.0 s, 52–85 % | 500, **100 ms / 0.65–0.95 s, 14 %** |
+| 1 tick/s | 1,000 | 1,000, 460–590 ms / 2.7–3.7 s, ~100 % | 1,000, **270 ms / 1.4–2.6 s, ~42 %** |
+| 1 tick/s | 1,500 | ~1,250 (250 refused/timed out), 630–770 ms / 3.8–8 s, ~100 % | **1,500**, 320–375 ms / 2.4–7.7 s, 100–165 % |
+| 4 ticks/s | 500 | 500, 190–210 ms / 0.65–0.95 s, ~115 % | 500, **100 ms / 0.4–0.45 s**, 45–91 % |
+| 4 ticks/s | 1,000 | ~590 connected, 510 ms / 1.7–1.8 s, ~104 % | ~890 connected, 320 ms / 1.8 s (11 s on one gateway), ~105 % |
+
+No client ever had to resync in any run.
 
 ## What this says
 
-* **One gateway process is comfortable up to roughly 500 concurrent clients** at a 4 Hz feed (p99 under about 340 ms on a
-  loaded laptop) and starts to fall behind between 600 and 800: latency approaches the 250 ms tick period, and the hub
-  responds as designed by skipping versions and sending full snapshots to clients that cannot keep up (22,932 snapshots
-  at 1,000 clients against 925 at 500). Slow clients degrade; they do not stall anyone else, and nobody is disconnected.
-* **1,000+ users therefore needs at least two gateway replicas**, three for headroom. Gateways are stateless and take
-  their data from Redis, so this is a scaling knob, not a redesign. *Measured here: one process. Not measured here:
-  several gateways behind a load balancer reading from Redis* (no Redis was available on this machine).
-* Rate matters. The feed was 4 ticks/s, which is faster than the 1–2 s a real provider normally delivers for an option
-  chain; at 1 tick/s the same process should carry several times more clients. Measure at your real rate.
-* The 1,000-client run's refused connections are the operating system's accept queue overflowing while the server was
-  busy sending, not a limit in the application. A load balancer in front, and a larger `--backlog`, remove it.
+* **At a 1 tick/s feed, two containerized gateways on a busy laptop carried 1,500 simultaneous clients** (all connected, median latency a few hundred ms, p95 about 1 s),
+  with a heavy tail (p99 several seconds) that the shared CPU and Docker Desktop's networking explain at least in part.
+  **1,000 users therefore looks achievable with two gateways at a realistic feed rate, and comfortable with three.** That is evidence, not proof: it was not measured on
+  dedicated Linux hardware with real network paths.
+* **At a 4 tick/s feed, 1,000 clients is beyond two gateways here** (about 890 connected, tails of seconds). If your real feed is that fast, plan more gateways or lower the rate.
+* A gateway is one single-threaded Python process; it saturates one core. Scaling is by adding replicas, which are stateless.
+* The **tail latency** (p99) is dominated by a tick being delivered to hundreds of sockets in sequence: the last client waits for the others. Median is the better guide to
+  typical experience; watch p95 in production (`rt_fanout_seconds`, alert `SlowFanOut`).
+* The generator and server shared one machine's CPU in every run, which inflates every figure.
 
-## Caveats (why these are a floor)
+## Caveats
 
-* The generator ran on the same CPU as the server and was itself a heavy user of it.
-* Windows' default asyncio loop is slower than Linux with `uvloop`; a production Linux container typically does noticeably
-  better. Not measured here.
-* Mock data and `AUTH_MODE=disabled`. With auth on, each connection adds a token check once at connect, nothing per frame.
-* Serialization is shared (each topic update is encoded once for all subscribers); the per-client cost is the socket write.
-* No real network: no latency, loss or slow mobile clients except in the dedicated `--slow-fraction` mode (tested in
-  Phase 2: slow clients are disconnected after 5 s without reading and never delay others).
+* Laptop, shared CPU, other containers running; Docker Desktop's network path adds overhead a real Linux host does not have. Native Windows and Docker numbers differ by a large factor
+  for the same code, which is itself a warning not to extrapolate.
+* Mock data, no real network, no slow mobile clients except in the dedicated `--slow-fraction` mode (slow clients are disconnected after 5 s without reading and never delay others).
+* One generator token was used for all clients (the per-user connection cap was raised for the test gateways only).
+* Not measured: more than two gateways, a real load balancer, TLS termination, real provider ticks.
 
 ## Reproduce
 
 ```bash
-# server (any machine)
+# native, one process
 AUTH_MODE=disabled MARKET_DATA_PROVIDER=mock POLL_INTERVAL_SECONDS=0.25 METRICS_TOKEN=loadtest \
-  python -m uvicorn src.api.server:app --port 8020 --log-level warning
+  python -m uvicorn src.api.server:app --port 8020 --ws-per-message-deflate false --log-level warning
+python scripts/loadtest_ws.py --url ws://127.0.0.1:8020 --clients 500 --duration 30 --ramp 12 --processes 4 --batch --json
 
-# load (separate machine if you can)
-python scripts/loadtest_ws.py --url ws://127.0.0.1:8020 --clients 500 --duration 30 --ramp 12 --processes 4 --json
+# the production shape
+docker compose up -d --build        # 2 ingestors, 2 gateways, Redis, PostgreSQL
+# raise WS_MAX_CONNECTIONS_PER_USER on the gateways (test only) and use one token for the generator:
+python scripts/loadtest_ws.py --url ws://127.0.0.1:8000 --clients 500 --token "$TOKEN" --batch --duration 30 --ramp 20
+python scripts/loadtest_ws.py --url ws://127.0.0.1:8001 --clients 500 --token "$TOKEN" --batch --duration 30 --ramp 20
 ```
-Add `--register 50` against an `AUTH_MODE=required` server (mind the 10-registrations-per-hour-per-IP limit), and
-`--slow-fraction 0.1` to include slow readers. For the Redis topology, run the compose stack
-(`docker compose up --build`) and point the generator at both gateways.
+Run the generator on a **separate machine** if you can. `--slow-fraction 0.1` adds slow readers; omit `--batch` to see the old per-topic behaviour.
 
-## Sizing rule of thumb
+## Sizing guidance (until measured on your hardware)
 
-`gateways ≈ ceil(concurrent users / 400)` at a 4 Hz feed on a comparable core, with a minimum of two for availability.
-Re-measure on your target hardware and real feed rate before committing to a number.
+Start with **three gateways for 1,000 concurrent users** (two is enough at a 1 tick/s feed on this evidence, three adds headroom and availability during a deploy),
+add one per ~400–500 users beyond that, and re-measure on the real infrastructure and the real feed rate before committing to a budget. Each gateway holds one
+process's worth of sockets; set `WS_MAX_CONNECTIONS_TOTAL` to about 800 so an overloaded gateway refuses new sockets instead of degrading everyone.

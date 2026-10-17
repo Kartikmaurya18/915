@@ -35,6 +35,9 @@ HEARTBEAT_SECONDS = _env_float("RT_HEARTBEAT_SECONDS", 15)
 SEND_TIMEOUT_SECONDS = _env_float("RT_SEND_TIMEOUT_SECONDS", 5)
 MAX_TOPICS_PER_CLIENT = int(os.getenv("RT_MAX_TOPICS_PER_CLIENT", "16"))
 CONTROL_QUEUE_MAX = int(os.getenv("RT_CONTROL_QUEUE_MAX", "64"))
+# A client that opted in to batching waits this long after being woken, so the other topics of the same
+# tick (they arrive as separate messages a few milliseconds apart) go out in one websocket message.
+BATCH_WINDOW_SECONDS = _env_float("RT_BATCH_WINDOW_MS", 4) / 1000.0
 # Sockets of a server running without auth have no user id; they all belong to this one implicit user.
 LOCAL_USER_KEY = "local-dev"
 PAPER_CHANGED_FRAME = protocol.control_message("paper_changed")
@@ -98,6 +101,7 @@ class ClientSession:
         self._force_full: set[str] = set()
         self._control: deque[str] = deque()
         self._paper_pending = False  # at most one "your paper book changed" notice is ever queued
+        self.batch = False  # the client asked for several topic updates per message
         self._event = asyncio.Event()
         self.closed = False
         self.close_reason: str | None = None
@@ -260,6 +264,8 @@ class ClientSession:
                     if not await self._send(self.hub.heartbeat_frame(), "heartbeat"):
                         return
                     continue
+                if self.batch and BATCH_WINDOW_SECONDS > 0 and self._dirty:
+                    await asyncio.sleep(BATCH_WINDOW_SECONDS)  # let the rest of this tick's topics arrive
                 self._event.clear()
                 while self._control and not self.closed:
                     if not await self._send(self._control.popleft(), "control"):
@@ -269,22 +275,40 @@ class ClientSession:
                     metrics.paper_notices.inc()
                     if not await self._send(PAPER_CHANGED_FRAME, "control"):
                         return
-                while self._dirty and not self.closed:
-                    topic = next(iter(self._dirty))
-                    del self._dirty[topic]
-                    built = self._next_frame(topic)
-                    if built is None:
-                        continue
-                    frame, kind, state = built
-                    if not await self._send(frame, kind):
-                        return
-                    self.sent[topic] = (state.epoch, state.seq)
-                    self._force_full.discard(topic)
-                    now = time.monotonic()
-                    metrics.fanout_seconds.observe(now - state.received)
-                    metrics.publish_to_send_seconds.observe(max(0.0, time.time() - state.pub / 1000.0))
+                if not await self._deliver_dirty():
+                    return
         except asyncio.CancelledError:
             raise
+
+    async def _deliver_dirty(self) -> bool:
+        """Send what every dirty topic needs. A batching client gets all of it in one message; others get
+        one message per topic, as before. Returns False if the client had to be dropped."""
+        built: list[tuple[str, str, str, "TopicState"]] = []
+        while self._dirty and not self.closed:
+            topic = next(iter(self._dirty))
+            del self._dirty[topic]
+            item = self._next_frame(topic)
+            if item is not None:
+                built.append((topic, *item))
+        if not built or self.closed:
+            return True
+        if self.batch and len(built) > 1:
+            if not await self._send(protocol.batch_message([b[1] for b in built]), "batch"):
+                return False
+            groups = [built]
+        else:
+            groups = [[b] for b in built]
+            for group in groups:
+                if not await self._send(group[0][1], group[0][2]):
+                    return False
+        now = time.monotonic()
+        for group in groups:
+            for topic, _frame, _kind, state in group:
+                self.sent[topic] = (state.epoch, state.seq)
+                self._force_full.discard(topic)
+                metrics.fanout_seconds.observe(now - state.received)
+                metrics.publish_to_send_seconds.observe(max(0.0, time.time() - state.pub / 1000.0))
+        return True
 
 
 class Hub:
