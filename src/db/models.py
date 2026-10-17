@@ -76,6 +76,13 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False, default=_utcnow)
     last_login_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True)
+    # Mobile number in E.164 ("+919876543210"). Unique: one account per number. Null for accounts created before
+    # phone verification existed (they are not asked for one).
+    phone: Mapped[Optional[str]] = mapped_column(String(16), unique=True, nullable=True)
+    # When the owner proved control of each contact detail with a one-time code. Existing accounts were stamped
+    # as email-verified by the migration so the upgrade does not lock anyone out.
+    email_verified_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True)
+    phone_verified_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True)
 
 
 class RefreshToken(Base):
@@ -100,6 +107,28 @@ class RefreshToken(Base):
         Index("ix_refresh_tokens_user_id", "user_id"),
         Index("ix_refresh_tokens_family_id", "family_id"),
     )
+
+
+class OtpChallenge(Base):
+    """A one-time code sent to an email address or phone number. Only a keyed hash of the code is stored.
+
+    One live challenge per (user, purpose, channel): sending a new code retires the previous one. `attempts` is
+    advanced BEFORE a guess is compared, so parallel guesses cannot exceed the limit."""
+
+    __tablename__ = "otp_challenges"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    purpose: Mapped[str] = mapped_column(String(24), nullable=False)  # verify_contact | reset_password
+    channel: Mapped[str] = mapped_column(String(8), nullable=False)  # email | phone
+    destination: Mapped[str] = mapped_column(String(254), nullable=False)
+    code_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False, default=_utcnow)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    consumed_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True)
+
+    __table_args__ = (Index("ix_otp_user_purpose_channel", "user_id", "purpose", "channel", "created_at"),)
 
 
 class PaperSettings(Base):

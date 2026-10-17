@@ -47,7 +47,7 @@ def test_every_metric_in_an_alert_exists_in_the_code():
         expr = re.sub(r"\{[^}]*\}", "", expr)  # drop selectors
         words = set(re.findall(r"\b([a-z_][a-z0-9_]*)\b", expr))
         functions = {"sum", "rate", "increase", "histogram_quantile", "by", "le", "instance", "without", "avg", "max", "min", "on", "ignoring"}
-        metrics = {w for w in words if w not in functions and not w.isdigit() and (w.startswith(("rt_", "db_", "rate_limit_")) or w == "up")}
+        metrics = {w for w in words if w not in functions and not w.isdigit() and (w.startswith(("rt_", "db_", "rate_limit_", "otp_")) or w == "up")}
         unknown = metrics - known
         if unknown:
             missing[rule["alert"]] = unknown
@@ -63,6 +63,7 @@ def test_label_values_used_in_alerts_are_ones_the_code_emits():
         "rt_clients_dropped_total": ("reason", ["slow_consumer", "server_at_capacity"]),
         "rt_snapshots_sent_total": ("reason", ["behind"]),
         "rt_leader_changes_total": ("event", ["acquired"]),
+        "otp_delivery_total": ("result", ["error"]),
     }
     for rule in load_rules():
         for metric, (label, values) in checks.items():

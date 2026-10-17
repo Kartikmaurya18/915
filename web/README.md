@@ -25,7 +25,7 @@ With `AUTH_MODE=disabled` (the local default) the app skips sign-in and acts as 
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm test` | Unit and component tests (vitest + jsdom) |
 | `npm run build` | Type-check, then build to `web/dist` |
-| `E2E_BASE_URL=http://127.0.0.1:8010 npm run test:e2e` | Browser code paths against a running backend started with `AUTH_MODE=required` |
+| `E2E_BASE_URL=http://127.0.0.1:8010 npm run test:e2e` | Browser code paths against a running backend started with `AUTH_MODE=required VERIFICATION_MODE=off` (the suite registers through the API; verification has its own tests) |
 
 ## Production
 

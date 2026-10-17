@@ -277,10 +277,15 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 @app.exception_handler(AuthError)
 async def _auth_error_handler(_request: Request, exc: AuthError) -> JSONResponse:
+    headers: dict[str, str] = {}
+    if exc.status == 401:
+        headers["WWW-Authenticate"] = "Bearer"
+    if exc.retry_after:
+        headers["Retry-After"] = str(int(exc.retry_after))
     return JSONResponse(
         status_code=exc.status,
-        content={"detail": {"code": exc.code, "message": exc.message}},
-        headers={"WWW-Authenticate": "Bearer"} if exc.status == 401 else None,
+        content={"detail": {"code": exc.code, "message": exc.message, **exc.extra}},
+        headers=headers or None,
     )
 
 

@@ -27,6 +27,9 @@ against a local PostgreSQL 16 container, **not** against a cloud provider.
 | `LIVE_DATA_ENABLED` | `true` allows the real Dhan market-data provider (off by default; mock and replay never need it). Showing real prices to other people needs a data licence this code cannot check; read [LIVE_DATA.md](LIVE_DATA.md) first. Needs `pip install -r requirements-live.txt`. |
 | `GREEKS_SOURCE` | `calculated` (default: provider values plus a Black-Scholes calculator for gaps) or `provider` (only what the provider sends; mock then has no Greeks). |
 | `RISK_FREE_RATE`, `DIVIDEND_YIELD` | Inputs to the calculator (defaults 0.065 and 0.012). The dividend yield is only a fallback; the engine derives the market's carry from put-call parity when the quotes allow. |
+| `VERIFICATION_MODE` | `both` (default) / `email` / `phone` / `off`: which contact details a new account must prove with one-time codes. In production the app refuses to start unless every required channel has a real provider. Full guide: [AUTH.md](AUTH.md). |
+| `EMAIL_PROVIDER`, `SMS_PROVIDER` + their settings (`SMTP_*`, `EMAIL_FROM`, `TWILIO_*`, `SMS_WEBHOOK_*`) | How codes are delivered. `console` prints them to the log and is allowed only outside production. |
+| `OTP_TTL_MINUTES`, `OTP_MAX_ATTEMPTS`, `OTP_RESEND_SECONDS`, `OTP_MAX_SENDS_PER_HOUR` | Code lifetime (10), guesses per code (5), resend cooldown (60 s), codes per hour per account and channel (5). |
 | `FRONTEND` | `spa` (default when `web/dist` exists) serves the React app; `legacy` serves the original single-file UI from `public/`. |
 | `TRUSTED_PROXY_HOPS` | Reverse proxies in front of the app. `0` ignores `X-Forwarded-For` (rate limits then see the proxy's IP, so set this correctly behind a load balancer). |
 

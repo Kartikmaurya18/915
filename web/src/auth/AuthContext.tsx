@@ -13,14 +13,41 @@ import { ApiError, request, setAccessToken, setRefreshHandler, type AuthUserInfo
 export type AuthMode = "required" | "disabled";
 export type AuthStatus = "loading" | "anonymous" | "authenticated";
 
+export type Channel = "email" | "phone";
+
+/** A sign-up or sign-in that must still prove its email and/or mobile number with one-time codes. */
+export interface Challenge {
+  token: string;
+  pending: Channel[];
+  /** Masked, e.g. "a***@example.com" and "+91*******210". */
+  destinations: Partial<Record<Channel, string>>;
+  resendAfterSeconds: number;
+  codeLength: number;
+}
+
+export type AuthResult = { kind: "signed-in" } | { kind: "verify"; challenge: Challenge };
+
+export interface RegisterInput {
+  email: string;
+  password: string;
+  /** E.164, e.g. "+919876543210". Omit when the server does not verify phones. */
+  phone?: string;
+}
+
 export interface AuthContextValue {
   status: AuthStatus;
   mode: AuthMode | null;
   user: AuthUserInfo | null;
   /** Increments whenever a new access token was issued (the realtime client renews on it). */
   tokenVersion: number;
-  login(email: string, password: string): Promise<void>;
-  register(email: string, password: string): Promise<void>;
+  login(email: string, password: string): Promise<AuthResult>;
+  register(input: RegisterInput): Promise<AuthResult>;
+  /** Check one code. Resolves to signed-in when it was the last one needed, else the challenge that remains. */
+  verify(challenge: Challenge, channel: Channel, code: string): Promise<AuthResult>;
+  /** Ask for a fresh code. Resolves with the seconds until another may be requested. */
+  resend(challenge: Challenge, channel: Channel): Promise<number>;
+  forgotPassword(email: string, channel: Channel): Promise<void>;
+  resetPassword(input: { email: string; channel: Channel; code: string; newPassword: string }): Promise<void>;
   logout(): Promise<void>;
 }
 
@@ -145,18 +172,72 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [adopt, clearSession]);
 
+  /** The server's "verify first" answers (a 202 from sign-up, a 403 from sign-in) become one shape. */
+  const toChallenge = (d: Record<string, unknown>): Challenge => ({
+    token: String(d.verification_token),
+    pending: (d.pending as Channel[]) ?? [],
+    destinations: (d.destinations as Challenge["destinations"]) ?? {},
+    resendAfterSeconds: Number(d.resend_after_seconds ?? 60),
+    codeLength: Number(d.code_length ?? 6),
+  });
+
   const login = useCallback(
-    async (email: string, password: string) => {
-      adopt(await request<TokenResponse>("/api/auth/login", { method: "POST", body: { email, password }, credentials: true, noRefresh: true }));
+    async (email: string, password: string): Promise<AuthResult> => {
+      try {
+        adopt(await request<TokenResponse>("/api/auth/login", { method: "POST", body: { email, password }, credentials: true, noRefresh: true }));
+        return { kind: "signed-in" };
+      } catch (err) {
+        if (err instanceof ApiError && err.code === "verification_required") return { kind: "verify", challenge: toChallenge(err.data) };
+        throw err;
+      }
     },
     [adopt],
   );
   const register = useCallback(
-    async (email: string, password: string) => {
-      adopt(await request<TokenResponse>("/api/auth/register", { method: "POST", body: { email, password }, credentials: true, noRefresh: true }));
+    async ({ email, password, phone }: RegisterInput): Promise<AuthResult> => {
+      const res = await request<TokenResponse | (Record<string, unknown> & { verification_required: true })>("/api/auth/register", {
+        method: "POST",
+        body: phone ? { email, password, phone } : { email, password },
+        credentials: true,
+        noRefresh: true,
+      });
+      if ("verification_required" in res && res.verification_required) return { kind: "verify", challenge: toChallenge(res) };
+      adopt(res as TokenResponse);
+      return { kind: "signed-in" };
     },
     [adopt],
   );
+  const verify = useCallback(
+    async (challenge: Challenge, channel: Channel, code: string): Promise<AuthResult> => {
+      const res = await request<(TokenResponse & { verification_required: false }) | (Record<string, unknown> & { verification_required: true })>("/api/auth/verify", {
+        method: "POST",
+        body: { verification_token: challenge.token, channel, code },
+        credentials: true,
+        noRefresh: true,
+      });
+      if (res.verification_required) {
+        return { kind: "verify", challenge: { ...challenge, pending: (res.pending as Channel[]) ?? [] } };
+      }
+      adopt(res as TokenResponse);
+      return { kind: "signed-in" };
+    },
+    [adopt],
+  );
+  const resend = useCallback(async (challenge: Challenge, channel: Channel): Promise<number> => {
+    const res = await request<{ resend_after_seconds?: number }>("/api/auth/resend", {
+      method: "POST",
+      body: { verification_token: challenge.token, channel },
+      credentials: true,
+      noRefresh: true,
+    });
+    return Number(res.resend_after_seconds ?? 60);
+  }, []);
+  const forgotPassword = useCallback(async (email: string, channel: Channel) => {
+    await request("/api/auth/password/forgot", { method: "POST", body: { email, channel }, credentials: true, noRefresh: true });
+  }, []);
+  const resetPassword = useCallback(async ({ email, channel, code, newPassword }: { email: string; channel: Channel; code: string; newPassword: string }) => {
+    await request("/api/auth/password/reset", { method: "POST", body: { email, channel, code, new_password: newPassword }, credentials: true, noRefresh: true });
+  }, []);
   const logout = useCallback(async () => {
     try {
       await request("/api/auth/logout", { method: "POST", body: {}, credentials: true, noRefresh: true });
@@ -167,8 +248,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [clearSession]);
 
   const value = useMemo<AuthContextValue>(
-    () => ({ status, mode, user, tokenVersion, login, register, logout }),
-    [status, mode, user, tokenVersion, login, register, logout],
+    () => ({ status, mode, user, tokenVersion, login, register, verify, resend, forgotPassword, resetPassword, logout }),
+    [status, mode, user, tokenVersion, login, register, verify, resend, forgotPassword, resetPassword, logout],
   );
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

@@ -140,3 +140,11 @@ groups:
         annotations:
           summary: "Login rate limits are falling back to per-process counters"
           description: "Redis is unreachable for the limiter, so the effective limit is multiplied by the number of gateways."
+
+      - alert: VerificationCodesNotDelivering
+        # A failed email or SMS means a person cannot finish signing up or reset a password.
+        expr: sum(increase(otp_delivery_total{result="error"}[10m])) > 3
+        labels: {severity: page}
+        annotations:
+          summary: "One-time codes are failing to send"
+          description: "Email or SMS delivery is failing, so people cannot verify or reset. Check the provider's status and credentials. Runbook: docs/RUNBOOK.md#verification-codes-not-arriving"

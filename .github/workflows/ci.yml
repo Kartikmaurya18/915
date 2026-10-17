@@ -77,6 +77,7 @@ jobs:
       MARKET_DATA_PROVIDER: mock
       POLL_INTERVAL_SECONDS: "1"
       COOKIE_SECURE: "false"
+      VERIFICATION_MODE: "off"  # the e2e suite registers through the API; verification has its own tests
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

@@ -15,7 +15,7 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 JWT_TEST_SECRET = "test-secret-" + "x" * 40
 _counter = itertools.count(1)
 USER_TABLES = (
-    "audit_log", "idempotency_keys", "paper_positions", "paper_settings", "refresh_tokens", "users",
+    "audit_log", "idempotency_keys", "otp_challenges", "paper_positions", "paper_settings", "refresh_tokens", "users",
 )
 
 
@@ -70,6 +70,9 @@ def auth_env(monkeypatch, tmp_path):
     monkeypatch.setenv("DATABASE_URL", external or f"sqlite:///{(tmp_path / 'users.db').as_posix()}")
     monkeypatch.delenv("APP_ENV", raising=False)
     monkeypatch.delenv("REGISTRATION_OPEN", raising=False)
+    # The long-standing auth tests register and sign in straight away. Verification has its own tests
+    # (tests/test_verification.py), which switch it on explicitly.
+    monkeypatch.setenv("VERIFICATION_MODE", "off")
 
     server.reset_paper_service()
     db_session.reset_engine()

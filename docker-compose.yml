@@ -15,6 +15,9 @@ x-common-env: &common-env
   REDIS_URL: redis://redis:6379/0
   AUTH_MODE: required
   JWT_SECRET: dev-only-jwt-secret-change-me-0123456789abcdef
+  # This stack is a local topology demo and its scripts register throw-away users, so it does not verify them.
+  # Set VERIFICATION_MODE=both (with EMAIL_PROVIDER/SMS_PROVIDER, see docs/AUTH.md) to try the real flow.
+  VERIFICATION_MODE: ${VERIFICATION_MODE:-off}
   MARKET_DATA_PROVIDER: mock
   POLL_INTERVAL_SECONDS: "1"
 

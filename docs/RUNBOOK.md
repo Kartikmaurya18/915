@@ -113,6 +113,16 @@ database outage leaves a **gap in stored history** for its duration (live users 
 * To remove one user's sessions: set `users.is_active = false`; refresh is refused immediately and access tokens expire within 15 minutes.
 * Close registration: `REGISTRATION_OPEN=false` and restart gateways.
 
+## Verification codes not arriving
+
+**Alert:** `VerificationCodesNotDelivering`. **Effect:** people cannot finish signing up or resetting a password; existing signed-in users are unaffected.
+
+1. Which channel? `otp_delivery_total{channel,provider,result}` on `/metrics`, and the gateway log lines `code delivery failed (<channel> via <provider> to <masked>)`. The log never contains a code or a provider's response body.
+2. Email (`smtp`): is the SMTP host reachable and the credentials valid (an app password that was revoked is the usual cause)? Is `EMAIL_FROM` on a domain with SPF/DKIM? Mail that is "sent" but never arrives is almost always spam filtering or a sender-domain problem, which this metric cannot see.
+3. SMS (`twilio` / `webhook`): the log says `provider answered HTTP <status>`. 401 is bad credentials, 400 is usually a number or sender problem, 429 is the provider's own limit. For India, a sender that is not DLT-registered is rejected by the carriers even when the provider accepts the request.
+4. While it is fixed, people can ask for a new code from the verify screen; nothing needs cleaning up. To let people in during a long outage set `VERIFICATION_MODE=email` (or `off`) and restart the gateways; unverified accounts then sign in normally.
+5. Never enable `EMAIL_PROVIDER=console` / `SMS_PROVIDER=console` in production: the app refuses to start with them, because they print codes into the log.
+
 ## Deploy and rollback
 
 Order: **migrate once, then ingestors, then gateways.**

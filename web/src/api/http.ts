@@ -7,11 +7,14 @@ export class ApiError extends Error {
   status: number;
   code: string;
   retryAfter: number | null;
-  constructor(status: number, code: string, message: string, retryAfter: number | null = null) {
+  /** Extra fields the server sent with the error (pending channels, attempts left, ...). Never secrets. */
+  data: Record<string, unknown>;
+  constructor(status: number, code: string, message: string, retryAfter: number | null = null, data: Record<string, unknown> = {}) {
     super(message);
     this.status = status;
     this.code = code;
     this.retryAfter = retryAfter;
+    this.data = data;
   }
 }
 
@@ -59,6 +62,7 @@ export function refreshOnce(): Promise<boolean> {
 async function toError(res: Response): Promise<ApiError> {
   let code = "http_" + res.status;
   let message = res.statusText || "Request failed";
+  let data: Record<string, unknown> = {};
   try {
     const body = (await res.json()) as { detail?: unknown };
     const detail = body?.detail;
@@ -71,12 +75,14 @@ async function toError(res: Response): Promise<ApiError> {
       const d = detail as { code?: string; message?: string };
       code = d.code ?? code;
       message = d.message ?? message;
+      data = detail as Record<string, unknown>;
     }
   } catch {
     /* non-JSON error body */
   }
   const retry = res.headers.get("Retry-After");
-  return new ApiError(res.status, code, message, retry ? Number(retry) : null);
+  const fromBody = typeof data.retry_after === "number" ? data.retry_after : null;
+  return new ApiError(res.status, code, message, retry ? Number(retry) : fromBody, data);
 }
 
 export interface RequestOptions {

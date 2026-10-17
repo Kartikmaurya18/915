@@ -12,6 +12,7 @@ const Overview = lazy(() => import("./pages/Overview"));
 const Trading = lazy(() => import("./pages/Trading"));
 const Strategy = lazy(() => import("./pages/Strategy"));
 const Workspace = lazy(() => import("./pages/Workspace"));
+const ForgotPassword = lazy(() => import("./pages/ForgotPassword"));
 const History = lazy(() => import("./pages/History"));
 const Rrg = lazy(() => import("./pages/Rrg"));
 const Quality = lazy(() => import("./pages/Quality"));
@@ -36,6 +37,7 @@ export function App() {
           <Route element={<RedirectIfAuthed />}>
             <Route path="/login" element={<AuthPage kind="login" />} />
             <Route path="/register" element={<AuthPage kind="register" />} />
+            <Route path="/forgot" element={<ForgotPassword />} />
           </Route>
           <Route element={<RequireAuth />}>
             <Route element={<Layout />}>

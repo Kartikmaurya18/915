@@ -44,6 +44,34 @@ class AuthSession:
     refresh_expires_at: datetime
 
 
+class VerificationRequired(AuthError):
+    """The password was right but the account has not yet proved it controls its email / phone."""
+
+    def __init__(self, user_id: str, pending: list[str]):
+        super().__init__(
+            "verification_required",
+            "Verify your " + " and ".join("email" if c == "email" else "mobile number" for c in pending) + " to continue.",
+            status=403,
+            extra={"pending": pending},
+        )
+        self.user_id = user_id
+        self.pending = pending
+
+
+def pending_channels(user: User) -> list[str]:
+    """The contact details this account still has to verify under the current VERIFICATION_MODE.
+
+    Accounts that predate verification were stamped email-verified by the migration and have no phone number; they
+    are not asked for one, so turning verification on never locks an existing user out."""
+    pending: list[str] = []
+    for channel in settings.required_channels():
+        if channel == "email" and user.email_verified_at is None:
+            pending.append("email")
+        elif channel == "phone" and user.phone is not None and user.phone_verified_at is None:
+            pending.append("phone")
+    return pending
+
+
 def normalize_email(email: str) -> str:
     email = (email or "").strip().lower()
     if len(email) > 254 or not _EMAIL_RE.match(email):
@@ -123,6 +151,10 @@ def login(session: Session, email: str, password: str, ip: str | None = None) ->
         session.commit()  # keep the failure record even though the request fails
         raise AuthError("invalid_credentials", "Incorrect email or password.")
     now = datetime.now(timezone.utc)
+    pending = pending_channels(user)
+    if pending:
+        # No session until the contact details are proven. The caller issues fresh codes and a verification token.
+        raise VerificationRequired(user.id, pending)
     if needs_rehash(user.password_hash):
         user.password_hash = hash_password(password)
     user.last_login_at = now

@@ -25,11 +25,13 @@ _DUMMY_HASH = _hasher.hash("timing-equalisation-placeholder")
 class AuthError(Exception):
     """An authentication/authorization failure safe to show the client."""
 
-    def __init__(self, code: str, message: str, status: int = 401):
+    def __init__(self, code: str, message: str, status: int = 401, *, retry_after: int | None = None, extra: dict | None = None):
         super().__init__(message)
         self.code = code
         self.message = message
         self.status = status
+        self.retry_after = retry_after  # seconds; sent as Retry-After on 429s
+        self.extra = extra or {}  # additional JSON fields for the client (never secrets)
 
 
 def hash_password(password: str) -> str:
@@ -92,3 +94,47 @@ def new_refresh_token() -> str:
 
 def hash_refresh_token(raw: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+# -- verification token: proves "this person just passed the password check / registered" for the short time
+#    they have to finish entering their codes. It cannot be used as an access token (typ differs, and the access
+#    decoder insists on typ=access) and it carries no role.
+
+VERIFY_TYP = "verify"
+
+
+def create_verification_token(user_id: str, now: datetime | None = None) -> str:
+    now = now or datetime.now(timezone.utc)
+    return jwt.encode(
+        {
+            "iss": ISSUER,
+            "aud": AUDIENCE,
+            "sub": user_id,
+            "typ": VERIFY_TYP,
+            "iat": int(now.timestamp()),
+            "exp": int((now + timedelta(seconds=settings.verification_token_ttl_seconds())).timestamp()),
+            "jti": secrets.token_hex(8),
+        },
+        settings.jwt_secret(),
+        algorithm=ALGORITHM,
+    )
+
+
+def decode_verification_token(token: str) -> str:
+    """The user id the token was issued for, or AuthError."""
+    try:
+        claims = jwt.decode(
+            token or "",
+            settings.jwt_secret(),
+            algorithms=[ALGORITHM],
+            audience=AUDIENCE,
+            issuer=ISSUER,
+            options={"require": ["exp", "iat", "sub", "aud", "iss"]},
+        )
+    except jwt.ExpiredSignatureError as exc:
+        raise AuthError("verification_expired", "This verification session has expired. Sign in again to get new codes.") from exc
+    except jwt.PyJWTError as exc:
+        raise AuthError("invalid_verification_token", "Invalid verification session. Sign in again.") from exc
+    if claims.get("typ") != VERIFY_TYP:
+        raise AuthError("invalid_verification_token", "Invalid verification session. Sign in again.")
+    return claims["sub"]
