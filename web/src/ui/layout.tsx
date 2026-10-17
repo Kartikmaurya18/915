@@ -55,7 +55,7 @@ export function MetricGrid({ children, columns = 4 }: { children: ReactNode; col
 /** Horizontal scroll container with a keyboard-focusable region, so wide tables can be scrolled without a mouse. */
 export function TableWrap({ children, label, className }: { children: ReactNode; label: string; className?: string }) {
   return (
-    <div role="region" aria-label={label} tabIndex={0} className={cn("overflow-auto rounded-control", className)}>
+    <div role="region" aria-label={label} tabIndex={0} className={cn("relative overflow-auto rounded-control", className)}>
       {children}
     </div>
   );

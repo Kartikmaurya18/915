@@ -1,21 +1,21 @@
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { ArrowRight, Zap } from "lucide-react";
 import { usePaperState } from "../api/usePaperState";
 import { useConfig } from "../api/useConfig";
-import type { CandlesTopic, IndexTopic, OptionsTopic, StrikeRow } from "../api/types";
+import type { CandlesTopic, IndexTopic, OptionsTopic } from "../api/types";
+import { OptionChainCard } from "../components/OptionChainCard";
 import { PriceChartCard } from "../components/PriceChartCard";
 import { StraddleChart } from "../components/StraddleChart";
-import { fmt, fmtCompact, fmtInt, fmtSigned, fmtTime } from "../lib/format";
+import { fmt, fmtInt, fmtSigned, fmtTime } from "../lib/format";
 import { useTopic } from "../realtime/RealtimeProvider";
-import { distinctStrikes, focusStrike, selectionKey } from "../state/selection";
+import { distinctStrikes, focusStrike } from "../state/selection";
 import { useSelection } from "../state/SelectionContext";
 import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
 import { Card } from "../ui/Card";
 import { cn } from "../ui/cn";
 import { EmptyState, ErrorState } from "../ui/feedback";
-import { Checkbox } from "../ui/fields";
 import { Metric, MetricGrid, PageHeader, R, TABLE, TD, TH, TableWrap } from "../ui/layout";
 import { useUI } from "../ui/UIProvider";
 
@@ -69,7 +69,7 @@ export default function Overview() {
 
       <StraddleSection options={options.data} atm={atm?.strike ?? null} />
 
-      <OptionChain options={options.data} atm={atm?.strike ?? null} loading={!config || options.data === undefined} />
+      <OptionChainCard options={options.data} atm={atm?.strike ?? null} loading={!config || options.data === undefined} />
 
       <RecentCandles candles={candles.data} interval={intervals[0] ?? 1} />
     </>
@@ -100,133 +100,6 @@ function PaperSummary() {
         </MetricGrid>
       )}
     </section>
-  );
-}
-
-const WINDOW = 6; // strikes shown either side of the at-the-money strike unless expanded
-
-interface RowProps {
-  row: StrikeRow;
-  ce: boolean;
-  pe: boolean;
-  onPick: (strike: number, type: "CE" | "PE") => void;
-  onTrade: (strike: number) => void;
-}
-
-/** One strike. Memoised: a tick that changes three strikes re-renders three rows, not all of them. */
-const ChainRow = memo(function ChainRow({ row, ce, pe, onPick, onTrade }: RowProps) {
-  const bg = row.is_atm ? "bg-brand-soft" : "bg-surface";
-  return (
-    <tr>
-      <td className={cn(TD, "w-px pr-0", bg)}>
-        <Checkbox checked={ce} onChange={() => onPick(row.strike, "CE")} aria-label={`Select ${fmtInt(row.strike)} CE`} />
-      </td>
-      <td className={cn(TD, R, "cursor-pointer font-medium", bg, ce && "bg-brand-soft ring-1 ring-inset ring-brand")} onClick={() => onPick(row.strike, "CE")}>
-        {fmt(row.call_ltp)}
-      </td>
-      <td className={cn(TD, R, "text-muted", bg)}>{fmt(row.call_delta, 3)}</td>
-      <td className={cn(TD, R, "sticky left-0 z-1 font-semibold shadow-[1px_0_0_var(--line)]", bg)}>
-        {fmtInt(row.strike)}
-        {row.is_atm && <Badge tone="brand" className="ml-1.5 align-middle">ATM</Badge>}
-      </td>
-      <td className={cn(TD, R, "text-muted", bg)}>{fmt(row.put_delta, 3)}</td>
-      <td className={cn(TD, R, "cursor-pointer font-medium", bg, pe && "bg-brand-soft ring-1 ring-inset ring-brand")} onClick={() => onPick(row.strike, "PE")}>
-        {fmt(row.put_ltp)}
-      </td>
-      <td className={cn(TD, "w-px pr-0", bg)}>
-        <Checkbox checked={pe} onChange={() => onPick(row.strike, "PE")} aria-label={`Select ${fmtInt(row.strike)} PE`} />
-      </td>
-      <td className={cn(TD, R, bg)}>{fmt(row.combined_value)}</td>
-      <td className={cn(TD, R, "text-muted", bg)}>{fmtCompact(row.call_oi)}</td>
-      <td className={cn(TD, R, "text-muted", bg)}>{fmtCompact(row.put_oi)}</td>
-      <td className={cn(TD, bg)}>
-        <button type="button" onClick={() => onTrade(row.strike)} aria-label={`Trade ${fmtInt(row.strike)}`} className="grid size-8 place-items-center rounded-control text-muted hover:bg-surface-2 hover:text-brand-fg">
-          <Zap aria-hidden="true" className="size-4" />
-        </button>
-      </td>
-    </tr>
-  );
-});
-
-function OptionChain({ options, atm, loading }: { options: OptionsTopic | undefined; atm: number | null; loading: boolean }) {
-  const sel = useSelection();
-  const { openOrder } = useUI();
-  const [showAll, setShowAll] = useState(false);
-  const all = useMemo(() => [...(options?.strikes ?? [])].sort((a, b) => a.strike - b.strike), [options?.strikes]);
-  const rows = useMemo(() => {
-    if (showAll) return all;
-    const at = all.findIndex((r) => r.is_atm || r.strike === atm);
-    return at < 0 ? all : all.slice(Math.max(0, at - WINDOW), at + WINDOW + 1);
-  }, [all, atm, showAll]);
-
-  const expiry = options?.expiry ?? null;
-  const underlying = options?.underlying ?? null;
-  const toggle = sel.toggle;
-  const onPick = useCallback((strike: number, optionType: "CE" | "PE") => toggle({ strike, optionType, expiry, underlying }), [toggle, expiry, underlying]);
-  const onTrade = useCallback((strike: number) => openOrder({ strike, optionType: "CE" }), [openOrder]);
-  const count = sel.selection.size;
-
-  return (
-    <Card
-      id="option-chain"
-      title="Option chain"
-      description={expiry ? `Expiry ${expiry}. Tick CE or PE to build a selection; one is a single trade, several is multi-strike.` : "Waiting for the option chain…"}
-      flush
-      className="scroll-mt-20"
-      actions={
-        count > 0 && (
-          <>
-            <Button size="sm" onClick={sel.clear}>
-              Clear
-            </Button>
-            <Link to="/trading" className="inline-flex min-h-8 items-center gap-1.5 rounded-control bg-brand px-3 text-sm font-medium text-on-brand hover:brightness-110">
-              Trade {count} selected <ArrowRight aria-hidden="true" className="size-4" />
-            </Link>
-          </>
-        )
-      }
-    >
-      {loading ? (
-        <div className="px-4 pb-4 sm:px-5"><div aria-busy="true" role="status" className="h-48 animate-pulse rounded-control bg-surface-2"><span className="sr-only">Loading option chain</span></div></div>
-      ) : rows.length === 0 ? (
-        <EmptyState title="No option chain yet">The chain appears once the market feed delivers it.</EmptyState>
-      ) : (
-        <div className="px-2 pb-3 sm:px-3">
-          <TableWrap label="Option chain" className="max-h-128">
-            <table className={TABLE}>
-              <caption className="sr-only">Option chain by strike with call and put prices, deltas, combined value and open interest</caption>
-              <thead>
-                <tr>
-                  <th className={TH}><span className="sr-only">Select call</span></th>
-                  <th className={cn(TH, R)}>CE LTP</th>
-                  <th className={cn(TH, R)}>CE Δ</th>
-                  <th className={cn(TH, R, "sticky left-0 z-20")}>Strike</th>
-                  <th className={cn(TH, R)}>PE Δ</th>
-                  <th className={cn(TH, R)}>PE LTP</th>
-                  <th className={TH}><span className="sr-only">Select put</span></th>
-                  <th className={cn(TH, R)}>CE+PE</th>
-                  <th className={cn(TH, R)}>CE OI</th>
-                  <th className={cn(TH, R)}>PE OI</th>
-                  <th className={TH}><span className="sr-only">Trade</span></th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((r) => (
-                  <ChainRow key={r.strike} row={r} ce={sel.selection.has(selectionKey(r.strike, "CE"))} pe={sel.selection.has(selectionKey(r.strike, "PE"))} onPick={onPick} onTrade={onTrade} />
-                ))}
-              </tbody>
-            </table>
-          </TableWrap>
-          {(all.length > rows.length || showAll) && (
-            <div className="mt-2 px-2">
-              <Button size="sm" onClick={() => setShowAll((v) => !v)}>
-                {showAll ? "Show fewer strikes" : `Show all ${all.length} strikes`}
-              </Button>
-            </div>
-          )}
-        </div>
-      )}
-    </Card>
   );
 }
 
