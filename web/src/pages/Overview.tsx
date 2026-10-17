@@ -7,6 +7,7 @@ import type { CandlesTopic, IndexTopic, OptionsTopic } from "../api/types";
 import { OptionChainCard } from "../components/OptionChainCard";
 import { PriceChartCard } from "../components/PriceChartCard";
 import { StraddleChart } from "../components/StraddleChart";
+import { StrangleChart } from "../components/StrangleChart";
 import { fmt, fmtInt, fmtSigned, fmtTime } from "../lib/format";
 import { useTopic } from "../realtime/RealtimeProvider";
 import { distinctStrikes, focusStrike } from "../state/selection";
@@ -68,6 +69,8 @@ export default function Overview() {
       {underlying && <PriceChartCard underlying={underlying} intervals={intervals} />}
 
       <StraddleSection options={options.data} atm={atm?.strike ?? null} />
+
+      <StrangleChart rows={options.data?.strikes ?? []} atm={atm?.strike ?? null} expiry={options.data?.expiry ?? null} />
 
       <OptionChainCard options={options.data} atm={atm?.strike ?? null} loading={!config || options.data === undefined} />
 

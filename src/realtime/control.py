@@ -42,6 +42,7 @@ ALLOWED = frozenset(
         "get_historical_session",
         "get_persisted_strike_candles_for_date",
         "get_strike_straddle_candles",
+        "get_pair_candles",
     }
 )
 MAX_REQUEST_AGE_SECONDS = 15.0

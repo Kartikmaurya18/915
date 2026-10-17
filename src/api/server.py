@@ -465,6 +465,20 @@ async def straddle_candles(strike: float, date: str | None = None, _user: AuthUs
     return data
 
 
+@app.get("/api/pair-candles")
+async def pair_candles(ce_strike: float, pe_strike: float, _user: AuthUser = Depends(current_user)) -> dict:
+    """OHLC candles of CE@ce_strike + PE@pe_strike (a strangle; equal strikes give the straddle).
+
+    The first request for a pair starts tracking it, so its series begins then (`tracked_since`);
+    nothing earlier is reconstructed. 404 if either strike is not in the live chain."""
+    if not (0 < ce_strike < 10_000_000 and 0 < pe_strike < 10_000_000):
+        raise HTTPException(status_code=422, detail="strikes out of range")
+    data = await cached_engine_call(LIVE_TTL_SECONDS, "get_pair_candles", ce_strike, pe_strike)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Both strikes must be in the live option chain")
+    return data
+
+
 # -- Paper trading (per user when AUTH_MODE=required) ----------------------------
 
 

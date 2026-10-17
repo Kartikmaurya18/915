@@ -250,6 +250,16 @@ export interface StraddleCandles {
   by_interval: Record<string, Partial<Record<StraddleView, Bar[]>>>;
 }
 
+/** `GET /api/pair-candles`: candles of CE@ce_strike + PE@pe_strike, tracked from the first request. */
+export interface PairCandles {
+  ce_strike: number;
+  pe_strike: number;
+  expiry: string;
+  /** When the server started tracking this pair; nothing earlier exists. */
+  tracked_since: string;
+  by_interval: Record<string, { pair: Bar[] }>;
+}
+
 export interface TradingDates {
   dates: string[];
   today: string;

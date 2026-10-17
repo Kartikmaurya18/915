@@ -59,9 +59,12 @@ describe("History page", () => {
     await waitFor(() => expect(dateInput().value).toBe("2026-10-15"));
     expect(await screen.findByText("24,850.00")).toBeTruthy(); // close
     expect(screen.getByText("15-10-2026")).toBeTruthy();
-    const charts = screen.getAllByTestId("chart");
-    expect(charts[0]!.getAttribute("data-bars")).toBe("3"); // 1m candles
-    expect(charts[1]!.getAttribute("data-bars")).toBe("4"); // straddle taken from the bundle: no extra request
+    // The charts are fed by effects after the text appears: wait for them rather than race them.
+    await waitFor(() => {
+      const charts = screen.getAllByTestId("chart");
+      expect(charts[0]!.getAttribute("data-bars")).toBe("3"); // 1m candles
+      expect(charts[1]!.getAttribute("data-bars")).toBe("4"); // straddle taken from the bundle: no extra request
+    });
     expect(requested.some((u) => u.startsWith("/api/straddle-candles"))).toBe(false);
   });
 

@@ -25,6 +25,7 @@ from src.option_chain import (
     find_atm_strike_delta,
 )
 from src.option_chain.greeks import build_greeks_engine
+from src.option_chain.pair_candles import PairCandleEngine
 from src.paper_trading import PaperPosition, PaperTradeConfig, PaperTradingEngine
 from src.risk import EXIT_MANUAL
 from src.persistence import PersistenceStore, ensure_seeded
@@ -127,6 +128,12 @@ class MarketEngine:
         # (see StrikeStraddleCandleEngine), so switching strikes in the UI
         # is just switching which strike's already-tracked series is read.
         self._strike_candle_engine = StrikeStraddleCandleEngine(
+            intervals_minutes=self.intervals,
+            timezone=self.cfg.get("timezone", "Asia/Kolkata"),
+            session_start=self.session_start,
+        )
+        # CE+PE pairs at two different strikes (strangles), tracked on demand (see pair_candles.py).
+        self._pair_candle_engine = PairCandleEngine(
             intervals_minutes=self.intervals,
             timezone=self.cfg.get("timezone", "Asia/Kolkata"),
             session_start=self.session_start,
@@ -831,6 +838,7 @@ class MarketEngine:
                     )
             completed = self._aggregator.process_tick(candle_tick)
             completed_strike_candles = self._strike_candle_engine.process(chain, tick.timestamp)
+            self._pair_candle_engine.process(chain, tick.timestamp)
 
             # Log completed candles
             for candle in completed:
@@ -896,6 +904,32 @@ class MarketEngine:
             self._logger.log_error(exc, {"context": "tick_worker"})
             self._worker_error = exc
             self._stop_event.set()
+
+    def get_pair_candles(self, ce_strike: float, pe_strike: float) -> dict | None:
+        """Candles for CE@ce_strike + PE@pe_strike (a strangle; equal strikes make a straddle).
+
+        The first request for a pair starts tracking it, so it has no history before then:
+        `tracked_since` says when it began. None if either strike is not in the live chain."""
+        from src.serializers import serialize_candle
+
+        with self._lock:
+            chain = self._latest_chain
+            if chain is None or chain.get_leg(ce_strike) is None or chain.get_leg(pe_strike) is None:
+                return None
+            now = self._latest_tick.timestamp if self._latest_tick is not None else chain.timestamp
+            self._pair_candle_engine.track(ce_strike, pe_strike, now)
+            found = self._pair_candle_engine.get(ce_strike, pe_strike)
+            assert found is not None
+            since, by_interval = found
+            return {
+                "ce_strike": ce_strike,
+                "pe_strike": pe_strike,
+                "expiry": chain.expiry,
+                "tracked_since": since.isoformat(),
+                "by_interval": {
+                    str(i): {"pair": [serialize_candle(c) for c in candles]} for i, candles in by_interval.items()
+                },
+            }
 
     def get_strike_straddle_candles(self, strike: float) -> dict | None:
         """CE/PE/Straddle OHLC candles for one strike (any strike currently
