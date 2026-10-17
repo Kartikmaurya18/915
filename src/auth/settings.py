@@ -48,6 +48,28 @@ def registration_open() -> bool:
     return os.getenv("REGISTRATION_OPEN", "true").strip().lower() in ("1", "true", "yes")
 
 
+# -- Sign in with an identity provider (OAuth 2.0 / OpenID Connect) ----------------------------------------------
+
+OAUTH_PROVIDER_IDS = ("google", "oidc")
+
+
+def oauth_providers() -> tuple[str, ...]:
+    """Providers switched on, from OAUTH_PROVIDERS ("google", "oidc", or "google,oidc"). Empty = no social sign-in."""
+    raw = os.getenv("OAUTH_PROVIDERS", "")
+    ids = tuple(dict.fromkeys(p.strip().lower() for p in raw.split(",") if p.strip()))
+    unknown = [p for p in ids if p not in OAUTH_PROVIDER_IDS]
+    if unknown:
+        raise ValueError(f"OAUTH_PROVIDERS contains unknown provider(s) {unknown}; supported: {OAUTH_PROVIDER_IDS}")
+    return ids
+
+
+def public_base_url() -> str:
+    """The address people reach this app at (scheme and host, no trailing slash). The provider redirects back to it,
+    so it must match what is registered with the provider exactly. Behind a proxy the request cannot be trusted to
+    know it, which is why production requires it to be set."""
+    return os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+
+
 # -- Verification (OTP by email and SMS) ---------------------------------------------------------------------
 
 VERIFICATION_MODES = ("off", "email", "phone", "both")
@@ -137,6 +159,31 @@ def validate_startup_config() -> None:
                 f"{MIN_JWT_SECRET_LENGTH} characters."
             )
         _validate_delivery()
+        _validate_oauth()
+
+
+def _validate_oauth() -> None:
+    providers = oauth_providers()
+    if not providers:
+        return
+    problems: list[str] = []
+    base = public_base_url()
+    if is_production():
+        if not base:
+            problems.append("PUBLIC_BASE_URL is required in production (the provider redirects back to it)")
+        elif not base.lower().startswith("https://"):
+            problems.append("PUBLIC_BASE_URL must be https in production")
+    elif base and not base.lower().startswith(("http://", "https://")):
+        problems.append("PUBLIC_BASE_URL must start with http:// or https://")
+    needed = {"google": ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"), "oidc": ("OIDC_ISSUER", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET")}
+    for provider in providers:
+        for name in needed[provider]:
+            if not os.getenv(name):
+                problems.append(f"{name} is required for OAUTH_PROVIDERS={provider}")
+    if "oidc" in providers and is_production() and not os.getenv("OIDC_ISSUER", "").lower().startswith("https://"):
+        problems.append("OIDC_ISSUER must be https in production")
+    if problems:
+        raise RuntimeError("Refusing to start: social sign-in is not fully configured: " + "; ".join(problems) + ".")
 
 
 def _validate_delivery() -> None:

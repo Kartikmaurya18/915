@@ -1,10 +1,12 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { ShieldCheck, TrendingUp } from "lucide-react";
 import { ApiError, request } from "../api/http";
 import { useAuth, type Challenge } from "../auth/AuthContext";
+import { OAuthButtons, type OAuthProvider } from "../components/OAuthButtons";
 import { PhoneField } from "../components/PhoneField";
 import { VerifyPanel } from "../components/VerifyPanel";
+import { oauthErrorMessage } from "../lib/oauthErrors";
 import { DEFAULT_COUNTRY, buildE164 } from "../lib/phone";
 import { Button } from "../ui/Button";
 import { ErrorState } from "../ui/feedback";
@@ -15,22 +17,22 @@ const MIN_PASSWORD = 10;
 interface SignUpOptions {
   channels: string[];
   registration_open: boolean;
+  oauth?: OAuthProvider[];
 }
 
 /** What the sign-up form must ask for. If the server cannot say, offer the phone field: a wrong guess only costs an optional field. */
-function useSignUpOptions(enabled: boolean): { askPhone: boolean; closed: boolean } {
+function useSignUpOptions(): { askPhone: boolean; closed: boolean; oauth: OAuthProvider[] } {
   const [options, setOptions] = useState<SignUpOptions | null | "failed">(null);
   useEffect(() => {
-    if (!enabled) return;
     const ctrl = new AbortController();
     request<SignUpOptions>("/api/auth/options", { signal: ctrl.signal, noRefresh: true })
       .then((o) => !ctrl.signal.aborted && setOptions(o))
       .catch(() => !ctrl.signal.aborted && setOptions("failed"));
     return () => ctrl.abort();
-  }, [enabled]);
-  if (options === null) return { askPhone: false, closed: false };
-  if (options === "failed") return { askPhone: true, closed: false };
-  return { askPhone: options.channels.includes("phone"), closed: !options.registration_open };
+  }, []);
+  if (options === null) return { askPhone: false, closed: false, oauth: [] };
+  if (options === "failed") return { askPhone: true, closed: false, oauth: [] };
+  return { askPhone: options.channels.includes("phone"), closed: !options.registration_open, oauth: options.oauth ?? [] };
 }
 
 export function AuthShell({ children }: { children: ReactNode }) {
@@ -52,16 +54,27 @@ export function AuthShell({ children }: { children: ReactNode }) {
 export function AuthPage({ kind }: { kind: "login" | "register" }) {
   const { login, register } = useAuth();
   const isLogin = kind === "login";
-  const { askPhone, closed } = useSignUpOptions(!isLogin);
+  const { askPhone, closed, oauth } = useSignUpOptions();
+  const [params, setParams] = useSearchParams();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [country, setCountry] = useState(DEFAULT_COUNTRY);
   const [national, setNational] = useState("");
   const [phoneError, setPhoneError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  // A failed provider sign-in sends the browser back here with ?error=<code>; only known codes become text.
+  const [notice, setNotice] = useState<string | null>(() => oauthErrorMessage(params.get("error")));
   const [challenge, setChallenge] = useState<Challenge | null>(null);
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (params.has("error")) {
+      const next = new URLSearchParams(params);
+      next.delete("error");
+      setParams(next, { replace: true }); // the message is kept in state; the address bar should not keep it
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -129,6 +142,7 @@ export function AuthPage({ kind }: { kind: "login" | "register" }) {
           </p>
         )}
         {!isLogin && closed && <ErrorState>Registration is currently closed.</ErrorState>}
+        {!(!isLogin && closed) && <OAuthButtons providers={oauth} />}
 
         <Field label="Email">{(p) => <Input {...p} type="email" autoComplete="email" inputMode="email" required value={email} onChange={(e) => setEmail(e.target.value)} className="text-left" />}</Field>
         {!isLogin && askPhone && <PhoneField country={country} national={national} onCountry={setCountry} onNational={setNational} error={phoneError} />}

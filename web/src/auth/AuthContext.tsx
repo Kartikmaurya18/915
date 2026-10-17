@@ -48,6 +48,8 @@ export interface AuthContextValue {
   resend(challenge: Challenge, channel: Channel): Promise<number>;
   forgotPassword(email: string, channel: Channel): Promise<void>;
   resetPassword(input: { email: string; channel: Channel; code: string; newPassword: string }): Promise<void>;
+  /** After a provider sign-in: trade the refresh cookie the server just set for an access token. */
+  completeOAuth(): Promise<boolean>;
   logout(): Promise<void>;
 }
 
@@ -150,7 +152,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           if (cancelled) return;
           if (err instanceof ApiError && (err.status === 401 || err.status === 403)) return clearSession();
           // Network trouble or a rate limit: keep the hint, retry shortly, show the sign-in screen meanwhile.
-          setStatus("anonymous");
+          setStatus((current) => (current === "loading" ? "anonymous" : current));
           timer.current = setTimeout(() => void refreshRef.current(), 5_000);
           return;
         }
@@ -163,7 +165,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (cancelled) return;
         if (err instanceof ApiError && err.status === 404) return disabled();
         setMode("required");
-        setStatus("anonymous");
+        // Only ever loading -> anonymous. A sign-in that finished while this probe was in flight (the OAuth landing
+        // page does exactly that) must not be undone by the probe's late 401.
+        setStatus((current) => (current === "loading" ? "anonymous" : current));
       }
     })();
     return () => {
@@ -248,8 +252,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [clearSession]);
 
   const value = useMemo<AuthContextValue>(
-    () => ({ status, mode, user, tokenVersion, login, register, verify, resend, forgotPassword, resetPassword, logout }),
-    [status, mode, user, tokenVersion, login, register, verify, resend, forgotPassword, resetPassword, logout],
+    () => ({ status, mode, user, tokenVersion, login, register, verify, resend, forgotPassword, resetPassword, completeOAuth: refresh, logout }),
+    [status, mode, user, tokenVersion, login, register, verify, resend, forgotPassword, resetPassword, refresh, logout],
   );
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

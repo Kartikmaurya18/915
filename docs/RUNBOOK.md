@@ -123,6 +123,16 @@ database outage leaves a **gap in stored history** for its duration (live users 
 4. While it is fixed, people can ask for a new code from the verify screen; nothing needs cleaning up. To let people in during a long outage set `VERIFICATION_MODE=email` (or `off`) and restart the gateways; unverified accounts then sign in normally.
 5. Never enable `EMAIL_PROVIDER=console` / `SMS_PROVIDER=console` in production: the app refuses to start with them, because they print codes into the log.
 
+## Social sign-in failing
+
+Symptom: people click "Continue with Google" and land back on the sign-in page with a message, or Google shows an error page.
+
+1. **Google shows `redirect_uri_mismatch`:** the redirect URI registered in the Google console must equal `PUBLIC_BASE_URL` + `/api/auth/oauth/google/callback` exactly (scheme, host, port, no trailing slash). A load balancer that changes the scheme or host is the usual cause: set `PUBLIC_BASE_URL` explicitly.
+2. **Back on the sign-in page with "expired or not started in this browser":** the state cookie did not come back. Check that the callback is served on the same host as the start (not a different subdomain), that cookies are not blocked, and that `COOKIE_SECURE` matches the scheme (https in production).
+3. **"We could not sign you in with that provider":** see the gateway log line `oauth sign-in failed (<provider>): <code>: <detail>`. `token_exchange_failed` is a wrong client secret or an expired code; `id_token_invalid` names the check that failed; `provider_unreachable` is the gateway not reaching the provider's token or keys URL (egress or DNS).
+4. **"Email not verified by the provider":** the person's Google account has an unverified address. Nothing to fix here; they verify it with Google or use email sign-up.
+5. To switch social sign-in off without a deploy of code, unset `OAUTH_PROVIDERS` and restart the gateways; existing sessions and password sign-in are unaffected, and social accounts keep working through "Forgot password".
+
 ## Deploy and rollback
 
 Order: **migrate once, then ingestors, then gateways.**

@@ -12,18 +12,24 @@ from __future__ import annotations
 import hashlib
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from src.auth import delivery, otp, service, settings, verification
+import logging
+
+from src.auth import delivery, oauth, oauth_accounts, otp, service, settings, verification
 from src.auth.deps import AuthUser, client_ip, current_user
 from src.auth.security import create_verification_token, decode_verification_token
 from src.auth.ratelimit import make_limiter
 from src.db.models import User
 from src.db.session import run_in_transaction, session_scope
 
+log = logging.getLogger("market_data.auth.routes")
+
 REFRESH_COOKIE = "refresh_token"
+OAUTH_STATE_COOKIE = "oauth_state"
+OAUTH_PATH = "/api/auth/oauth"
 COOKIE_PATH = "/api/auth"
 
 # Shared through Redis when REDIS_URL is set, so the limits hold across gateway replicas (see ratelimit.py).
@@ -34,6 +40,7 @@ register_by_ip = make_limiter("register_ip", max_events=10, window_seconds=3600)
 otp_send_by_ip = make_limiter("otp_send_ip", max_events=20, window_seconds=3600)
 otp_verify_by_ip = make_limiter("otp_verify_ip", max_events=40, window_seconds=900)
 reset_by_account = make_limiter("reset_account", max_events=8, window_seconds=3600)
+oauth_by_ip = make_limiter("oauth_ip", max_events=40, window_seconds=600)
 
 
 def _account_key(email: str) -> str:
@@ -98,16 +105,20 @@ def _user_dict(user: User) -> dict:
     return {"id": user.id, "email": user.email, "role": user.role}
 
 
-def _respond(response: Response, result: service.AuthSession) -> dict:
+def _set_refresh_cookie(response: Response, token: str) -> None:
     response.set_cookie(
         REFRESH_COOKIE,
-        result.refresh_token,
+        token,
         max_age=settings.refresh_token_ttl_seconds(),
         httponly=True,
         secure=settings.cookie_secure(),
         samesite="lax",
         path=COOKIE_PATH,
     )
+
+
+def _respond(response: Response, result: service.AuthSession) -> dict:
+    _set_refresh_cookie(response, result.refresh_token)
     response.headers["Cache-Control"] = "no-store"
     return {
         "access_token": result.access_token,
@@ -136,6 +147,74 @@ def _pending_response(pending: verification.Pending, status_note: str = "verific
     }
 
 
+# -- sign in with an identity provider (Google, or any OpenID Connect provider) -----------------------------------
+
+# What the sign-in page is told when something goes wrong. The provider's own wording and our log detail never reach it.
+_OAUTH_UI_ERRORS = {
+    "state_mismatch": "oauth_expired",
+    "state_expired": "oauth_expired",
+    "email_unverified": "oauth_email_unverified",
+    "email_missing": "oauth_email_missing",
+    "account_disabled": "oauth_account_disabled",
+    "registration_closed": "oauth_registration_closed",
+}
+
+
+def _oauth_redirect_uri(request: Request, provider_id: str) -> str:
+    base = settings.public_base_url() or str(request.base_url).rstrip("/")
+    return f"{base}{OAUTH_PATH}/{provider_id}/callback"
+
+
+def _oauth_failure(code: str) -> RedirectResponse:
+    response = RedirectResponse(f"/login?error={code}", status_code=303)
+    response.delete_cookie(OAUTH_STATE_COOKIE, path=OAUTH_PATH)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@router.get("/oauth/{provider_id}/start")
+def oauth_start(provider_id: str, request: Request) -> RedirectResponse:
+    _require_enabled()
+    if not oauth_by_ip.hit(client_ip(request)):
+        return _oauth_failure("rate_limited")
+    try:
+        provider = oauth.get_provider(provider_id)
+        url, sealed = oauth.begin(provider, _oauth_redirect_uri(request, provider_id))
+    except oauth.OAuthError as exc:
+        if exc.code == "unknown_provider":
+            raise HTTPException(status_code=404, detail="Not found") from None
+        log.warning("oauth start failed (%s): %s", provider_id, exc)
+        return _oauth_failure("oauth_failed")
+    response = RedirectResponse(url, status_code=302)
+    # SameSite=Lax is what lets this cookie come back on the provider's top-level redirect to us, and nothing else.
+    response.set_cookie(OAUTH_STATE_COOKIE, sealed, max_age=oauth.STATE_TTL_SECONDS, httponly=True, secure=settings.cookie_secure(), samesite="lax", path=OAUTH_PATH)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@router.get("/oauth/{provider_id}/callback")
+def oauth_callback(provider_id: str, request: Request, code: str | None = None, state: str | None = None, error: str | None = None) -> RedirectResponse:
+    _require_enabled()
+    ip = client_ip(request)
+    if not oauth_by_ip.hit(ip):
+        return _oauth_failure("rate_limited")
+    if error:  # the person pressed Cancel at the provider, or the provider refused
+        log.info("oauth provider returned error=%s", error[:40])
+        return _oauth_failure("oauth_denied" if error == "access_denied" else "oauth_failed")
+    try:
+        provider = oauth.get_provider(provider_id)
+        who = oauth.finish(provider, _oauth_redirect_uri(request, provider_id), code or "", state or "", request.cookies.get(OAUTH_STATE_COOKIE, ""))
+        result = run_in_transaction(lambda s: oauth_accounts.sign_in(s, who, ip))
+    except oauth.OAuthError as exc:
+        log.warning("oauth sign-in failed (%s): %s", provider_id, exc)
+        return _oauth_failure(_OAUTH_UI_ERRORS.get(exc.code, "oauth_failed"))
+    response = RedirectResponse("/oauth/complete", status_code=303)
+    response.delete_cookie(OAUTH_STATE_COOKIE, path=OAUTH_PATH)
+    _set_refresh_cookie(response, result.refresh_token)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @router.get("/options")
 def options() -> dict:
     """What the sign-up form should ask for. Public, and says nothing about any account."""
@@ -145,6 +224,7 @@ def options() -> dict:
         "channels": list(settings.required_channels()),
         "registration_open": settings.registration_open(),
         "code_length": settings.otp_length(),
+        "oauth": oauth.enabled(),
     }
 
 

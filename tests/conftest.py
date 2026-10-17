@@ -15,7 +15,7 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 JWT_TEST_SECRET = "test-secret-" + "x" * 40
 _counter = itertools.count(1)
 USER_TABLES = (
-    "audit_log", "idempotency_keys", "otp_challenges", "paper_positions", "paper_settings", "refresh_tokens", "users",
+    "audit_log", "idempotency_keys", "oauth_identities", "otp_challenges", "paper_positions", "paper_settings", "refresh_tokens", "users",
 )
 
 

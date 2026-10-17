@@ -58,6 +58,59 @@ the channels you require are checked (`VERIFICATION_MODE=email` needs no SMS pro
   small function), or `twilio` if you use it. **Both senders were tested against local stand-ins, not against a live account.**
 * **Until SMS is ready:** run with `VERIFICATION_MODE=email`. Switching to `both` later asks only new registrations for a phone number.
 
+## Sign in with Google (or any OpenID Connect provider)
+
+People can choose **Continue with Google** on the sign-in and sign-up pages. The same button supports any OpenID Connect provider (Microsoft Entra,
+Okta, Keycloak, ...) through `OAUTH_PROVIDERS=oidc`. It is off until you configure it; with no provider the pages look exactly as before.
+
+### Setting up Google (your account, your credentials)
+
+1. In the [Google Cloud console](https://console.cloud.google.com/) create a project, configure the **OAuth consent screen** (app name, support email;
+   keep the scopes to `openid`, `email`, `profile`), then **Credentials, Create credentials, OAuth client ID, Web application**.
+2. Under **Authorised redirect URIs** add exactly `<PUBLIC_BASE_URL>/api/auth/oauth/google/callback`, for example
+   `http://localhost:8000/api/auth/oauth/google/callback` for local testing and `https://app.example.com/api/auth/oauth/google/callback` in production.
+   It must match character for character (Google rejects a mismatch). Use `localhost`, not `127.0.0.1`, for local testing.
+3. Set on the gateways:
+
+| Setting | Meaning |
+|---|---|
+| `OAUTH_PROVIDERS` | `google`, `oidc`, or `google,oidc`. Empty (default) = no social sign-in. |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | From step 1. Keep the secret in your secret manager. |
+| `PUBLIC_BASE_URL` | The address people reach the app at, e.g. `https://app.example.com`. **Required in production and must be https**: the provider redirects back to it. |
+| `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_LABEL` | For the generic provider. Endpoints are found from `<issuer>/.well-known/openid-configuration`. |
+
+Google's endpoints, signing algorithm (RS256) and PKCE support were checked against its published discovery document. **Nothing has been run against a
+live Google account**: the flow was tested end to end against a fake provider with a real signing key, including in a real browser across two different
+sites. Your first real sign-in is the first real test, and the consent screen may need Google's verification before it works for people outside your org.
+
+### How it works, and what it protects against
+
+* **Authorization code flow with PKCE (S256), run by the server.** The browser is only sent to the provider and back; the client secret never reaches it.
+* A short-lived, signed, HttpOnly `SameSite=Lax` cookie holds the one-time `state`, `nonce` and PKCE verifier. The callback must present the matching
+  state **from the same browser**, which blocks login CSRF (forcing someone into an attacker's account).
+* The provider's **ID token is verified**: signature against its published keys (RS256/ES256 only, never `none` or a shared-secret algorithm), issuer,
+  audience, expiry, and the nonce. A token for another app, another issuer, an expired one, a replayed one and a forged one are all refused.
+* **The provider must say the email is verified.** An unverified address never becomes an account or a link.
+* On success the server sets the **same HttpOnly refresh cookie** as a password sign-in and redirects to `/oauth/complete`, which trades it for an access
+  token held in memory. **No token or code is ever in a URL the page can see.** No provider token is stored: only the stable subject id and the email.
+* Accounts are matched on the provider's **subject id, never the email**, so a changed or recycled address cannot take over an account.
+* **Linking to an existing account by email** happens only because the provider vouches for the email. If the existing account's email was **never
+  verified here**, its password is destroyed and its sessions revoked first (this is "pre-hijacking": an attacker registers a victim's address with their
+  own password and waits for the victim to use Google). The old password then no longer works; the real owner can set a new one with "Forgot password".
+* Social accounts get **no usable password** (a random one nobody knows) and are **not asked for a phone number**; their email counts as verified because
+  the provider verified it. `VERIFICATION_MODE=both` therefore applies to password sign-ups only. If you need a verified phone for everyone, social
+  sign-in would have to be disabled or a "add your phone" step built.
+* Disabled accounts cannot sign in this way; `REGISTRATION_OPEN=false` stops new social accounts too; per-IP rate limits apply to both endpoints.
+* Audit events: `oauth_register`, `oauth_link`, `oauth_login`, `oauth_unverified_account_reclaimed`.
+
+### Not included
+
+* **Google/OIDC only.** GitHub and Facebook are not OpenID Connect providers (GitHub needs a different, email-lookup flow) and are not built.
+* No "link another provider" or "unlink" screen, and no list of connected accounts. A person who signs in with a second provider using the same
+  verified email is linked to the same account automatically.
+* The authorization `code` and `state` appear in the callback URL (that is how OAuth works), so they can show in your web server's access logs. They are
+  single use and bound to the browser's PKCE verifier, so a logged one cannot be redeemed, but do not log them to places you would not log session data.
+
 ## Security properties (each is covered by a test)
 
 * Codes are random (`secrets`), numeric, and stored only as an **HMAC keyed from `JWT_SECRET`**, bound to the challenge, purpose and destination. The code

@@ -732,7 +732,7 @@ def test_the_migration_stamps_existing_accounts_verified(monkeypatch, tmp_path):
 def test_options_tells_the_form_what_to_ask_without_naming_any_account(client, monkeypatch):
     monkeypatch.setenv("VERIFICATION_MODE", "both")
     body = client.get("/api/auth/options").json()
-    assert body == {"verification": "both", "channels": ["email", "phone"], "registration_open": True, "code_length": 6}
+    assert body == {"verification": "both", "channels": ["email", "phone"], "registration_open": True, "code_length": 6, "oauth": []}
     monkeypatch.setenv("VERIFICATION_MODE", "off")
     assert client.get("/api/auth/options").json()["channels"] == []
     monkeypatch.setenv("REGISTRATION_OPEN", "false")

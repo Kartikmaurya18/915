@@ -25,6 +25,7 @@ from sqlalchemy import (
     Integer,
     String,
     TypeDecorator,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -129,6 +130,28 @@ class OtpChallenge(Base):
     consumed_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True)
 
     __table_args__ = (Index("ix_otp_user_purpose_channel", "user_id", "purpose", "channel", "created_at"),)
+
+
+class OAuthIdentity(Base):
+    """A sign-in identity at an external provider (Google, ...) linked to one account.
+
+    Keyed by the provider's stable subject id (`sub`), NEVER by email: an email can change hands, a `sub` does not.
+    `email` is only a record of what the provider said when the link was made."""
+
+    __tablename__ = "oauth_identities"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    provider: Mapped[str] = mapped_column(String(16), nullable=False)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    email: Mapped[str] = mapped_column(String(254), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False, default=_utcnow)
+    last_login_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("provider", "subject", name="uq_oauth_provider_subject"),
+        Index("ix_oauth_identities_user_id", "user_id"),
+    )
 
 
 class PaperSettings(Base):

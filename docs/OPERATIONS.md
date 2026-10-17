@@ -30,6 +30,7 @@ against a local PostgreSQL 16 container, **not** against a cloud provider.
 | `VERIFICATION_MODE` | `both` (default) / `email` / `phone` / `off`: which contact details a new account must prove with one-time codes. In production the app refuses to start unless every required channel has a real provider. Full guide: [AUTH.md](AUTH.md). |
 | `EMAIL_PROVIDER`, `SMS_PROVIDER` + their settings (`SMTP_*`, `EMAIL_FROM`, `TWILIO_*`, `SMS_WEBHOOK_*`) | How codes are delivered. `console` prints them to the log and is allowed only outside production. |
 | `OTP_TTL_MINUTES`, `OTP_MAX_ATTEMPTS`, `OTP_RESEND_SECONDS`, `OTP_MAX_SENDS_PER_HOUR` | Code lifetime (10), guesses per code (5), resend cooldown (60 s), codes per hour per account and channel (5). |
+| `OAUTH_PROVIDERS`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `OIDC_*`, `PUBLIC_BASE_URL` | "Continue with Google" / any OpenID Connect provider. Off unless `OAUTH_PROVIDERS` is set. In production `PUBLIC_BASE_URL` (https) is required and the app refuses to start if a provider is half-configured. Setup: [AUTH.md](AUTH.md). |
 | `FRONTEND` | `spa` (default when `web/dist` exists) serves the React app; `legacy` serves the original single-file UI from `public/`. |
 | `TRUSTED_PROXY_HOPS` | Reverse proxies in front of the app. `0` ignores `X-Forwarded-For` (rate limits then see the proxy's IP, so set this correctly behind a load balancer). |
 
