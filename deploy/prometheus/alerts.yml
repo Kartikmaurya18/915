@@ -1,0 +1,142 @@
+# Prometheus alert rules for Market Data.
+#
+# Scrape every gateway and every ingestor (see docs/DEPLOYMENT.md), label them `job="gateway"` and
+# `job="ingestor"`, then load this file with `rule_files:`. Thresholds are starting points: tune them
+# against your own traffic. Every metric used here is defined in src/ (tests/test_deploy_assets.py fails
+# if a name drifts), but the rules themselves have not been exercised against a live Prometheus yet.
+groups:
+  - name: market-data-availability
+    rules:
+      - alert: NoIngestorLeader
+        # Exactly one ingestor should hold the lease. None means no market data is being published.
+        expr: sum(rt_is_leader{job="ingestor"}) < 1
+        for: 30s
+        labels: {severity: page}
+        annotations:
+          summary: "No ingestor is leading"
+          description: "No market data is being published. Check the ingestors and Redis. Runbook: docs/RUNBOOK.md#no-ingestor-leader"
+
+      - alert: MultipleIngestorLeaders
+        # More than one leader should be impossible (fencing). If this fires, treat it as a bug.
+        expr: sum(rt_is_leader{job="ingestor"}) > 1
+        for: 15s
+        labels: {severity: page}
+        annotations:
+          summary: "More than one ingestor claims leadership"
+          description: "Fencing should prevent this. Stop one ingestor and capture logs. Runbook: docs/RUNBOOK.md#multiple-leaders"
+
+      - alert: IngestorFlapping
+        expr: increase(rt_leader_changes_total{job="ingestor", event="acquired"}[10m]) > 3
+        labels: {severity: warn}
+        annotations:
+          summary: "Leadership changed more than 3 times in 10 minutes"
+          description: "Likely Redis latency or an overloaded ingestor missing lease renewals. Runbook: docs/RUNBOOK.md#ingestor-flapping"
+
+      - alert: GatewayDown
+        expr: up{job="gateway"} == 0
+        for: 1m
+        labels: {severity: page}
+        annotations:
+          summary: "A gateway is not responding to scrapes"
+
+      - alert: IngestorDown
+        expr: up{job="ingestor"} == 0
+        for: 1m
+        labels: {severity: warn}
+        annotations:
+          summary: "An ingestor is not responding to scrapes"
+
+  - name: market-data-feed
+    rules:
+      - alert: MarketFeedStale
+        # Seconds since a gateway last received any market update; -1 means none yet.
+        expr: rt_feed_age_seconds{job="gateway"} > 15
+        for: 1m
+        labels: {severity: page}
+        annotations:
+          summary: "A gateway has not received market data for over 15 s"
+          description: "During market hours this means the ingestor, Redis or the data provider is not delivering. Runbook: docs/RUNBOOK.md#feed-stale"
+
+      - alert: RedisDisconnectedFromGateway
+        expr: rt_redis_up{job="gateway"} == 0
+        for: 30s
+        labels: {severity: page}
+        annotations:
+          summary: "A gateway has lost its Redis connection"
+          description: "Clients keep their last data and logins fall back to per-process rate limits. Runbook: docs/RUNBOOK.md#redis-down"
+
+      - alert: PublishesRejectedByFencing
+        expr: increase(rt_publish_total{result="fenced"}[5m]) > 0
+        labels: {severity: warn}
+        annotations:
+          summary: "An ingestor's publish was rejected because it is no longer the leader"
+          description: "Expected once during a failover. Repeated alerts mean a leader keeps losing its lease."
+
+      - alert: PublishErrors
+        expr: increase(rt_publish_total{result="error"}[5m]) > 10
+        labels: {severity: warn}
+        annotations:
+          summary: "Ingestor failed to publish to Redis"
+
+      - alert: DroppedOutOfOrderUpdates
+        expr: increase(rt_updates_total{result="out_of_order"}[10m]) > 20
+        labels: {severity: warn}
+        annotations:
+          summary: "Gateways are seeing out-of-order market updates"
+
+  - name: market-data-clients
+    rules:
+      - alert: SlowFanOut
+        # 95th percentile time from a gateway receiving an update to handing the frame to a socket.
+        expr: histogram_quantile(0.95, sum by (le, instance) (rate(rt_fanout_seconds_bucket{job="gateway"}[5m]))) > 0.5
+        for: 5m
+        labels: {severity: warn}
+        annotations:
+          summary: "Gateway fan-out p95 above 500 ms"
+          description: "The gateway is near its capacity (see docs/CAPACITY.md). Add replicas. Runbook: docs/RUNBOOK.md#gateway-saturated"
+
+      - alert: ManyClientsDropped
+        expr: sum by (instance) (increase(rt_clients_dropped_total{job="gateway", reason="slow_consumer"}[5m])) > 20
+        labels: {severity: warn}
+        annotations:
+          summary: "More than 20 slow clients disconnected in 5 minutes on one gateway"
+
+      - alert: ManySnapshotsInsteadOfPatches
+        # A healthy steady state is almost all patches. Many "behind" snapshots mean clients cannot keep up.
+        expr: sum by (instance) (rate(rt_snapshots_sent_total{job="gateway", reason="behind"}[5m])) > 20
+        for: 5m
+        labels: {severity: warn}
+        annotations:
+          summary: "Gateway is sending many catch-up snapshots"
+          description: "Clients are falling behind the feed. Add gateway replicas or reduce the tick rate."
+
+      - alert: ConnectionCapacityRejections
+        expr: increase(rt_clients_dropped_total{job="gateway", reason="server_at_capacity"}[5m]) > 0
+        labels: {severity: warn}
+        annotations:
+          summary: "A gateway is at its connection limit and refusing clients"
+
+  - name: market-data-control-and-db
+    rules:
+      - alert: ControlChannelFailing
+        expr: sum(increase(rt_control_rpc_errors_total{job="gateway"}[5m])) > 5
+        for: 2m
+        labels: {severity: warn}
+        annotations:
+          summary: "Gateways cannot reach the leading ingestor for settings, logs or history"
+          description: "History, settings and straddle candles return 503 while this lasts. Runbook: docs/RUNBOOK.md#no-ingestor-leader"
+
+      - alert: DatabaseDeadlocksOrRetries
+        expr: sum(increase(db_transaction_retries_total[10m])) > 10
+        labels: {severity: warn}
+        annotations:
+          summary: "Many database transactions needed a retry"
+          description: "Deadlocks or serialization failures. Look for a hot row or a missing index."
+
+      - alert: RateLimiterUsingFallback
+        expr: sum(increase(rate_limit_backend_errors_total[5m])) > 0
+        for: 5m
+        labels: {severity: warn}
+        annotations:
+          summary: "Login rate limits are falling back to per-process counters"
+          description: "Redis is unreachable for the limiter, so the effective limit is multiplied by the number of gateways."

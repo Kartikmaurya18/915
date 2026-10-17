@@ -1,6 +1,7 @@
 # Operations guide
 
-Topology, protocol and failure behaviour of the live feed are in [REALTIME.md](REALTIME.md).
+Topology, protocol and failure behaviour of the live feed are in [REALTIME.md](REALTIME.md). Going to production is in
+[DEPLOYMENT.md](DEPLOYMENT.md), incident handling in [RUNBOOK.md](RUNBOOK.md), measured capacity in [CAPACITY.md](CAPACITY.md).
 
 What is verified and what is not is stated explicitly. "Verified" means it was run
 against a local PostgreSQL 16 container, **not** against a cloud provider.
@@ -20,6 +21,9 @@ against a local PostgreSQL 16 container, **not** against a cloud provider.
 | `INGESTOR_ID`, `INGESTOR_LEASE_TTL_MS`, `INGESTOR_METRICS_PORT` | Ingestor identity, lease length (failover takes about one TTL after a crash) and its metrics port. |
 | `METRICS_TOKEN` | Bearer token for `/metrics`. Without it `/metrics` does not exist when auth is on. |
 | `WS_MAX_CONNECTIONS_PER_USER`, `WS_MAX_CONNECTIONS_TOTAL` | Per-account and per-process WebSocket caps. |
+| `RATE_LIMIT_BACKEND` | `auto` (default: Redis when `REDIS_URL` is set), `redis` or `memory`. With Redis the login/registration limits are shared by every gateway; if Redis is unreachable the limiter falls back to per-process counters and recovers by itself (metric `rate_limit_backend_errors_total`). |
+| `MARKET_HISTORY_BACKEND` | `sql` stores candles and ATM snapshots in the shared database (default when `AUTH_MODE=required` and `DATABASE_URL` is set); `sqlite` keeps the original local file (default for local development). |
+| `FRONTEND` | `spa` (default when `web/dist` exists) serves the React app; `legacy` serves the original single-file UI from `public/`. |
 | `TRUSTED_PROXY_HOPS` | Reverse proxies in front of the app. `0` ignores `X-Forwarded-For` (rate limits then see the proxy's IP, so set this correctly behind a load balancer). |
 
 Secrets come from the environment or a secret manager. `.env` is git-ignored and must never be committed.
@@ -82,13 +86,14 @@ a normal login.
   `/api/auth`; refresh/logout also require an `X-Requested-With` header (forces a CORS preflight, blocking CSRF).
 - Access tokens: 15 minutes, in memory on the client. A deactivated user's *existing* access token stays valid
   until it expires; refresh is refused immediately.
-- Two browser tabs refreshing at the same instant can sign the user out (the loser looks like a replay). The SPA
-  must serialise refreshes (single-flight / `BroadcastChannel`).
+- Two browser tabs refreshing at the same instant would look like a replayed token and sign the user out. The web app
+  serialises refreshes across tabs with the Web Locks API and shares one refresh among simultaneous requests in a tab.
 - WebSocket: the first frame must be `{"type":"auth","token":...}` within 5 s; nothing is sent before it. On `/ws/v1` the
   socket is closed (4401) when its access token expires unless the client sends a fresh `auth` frame for the same
   user first (in-band renewal). The legacy `/ws` (embedded mode only) does not enforce token expiry on open sockets.
-- Rate limits (login, registration) are **in-process**: with N gateway replicas the effective limit is N times higher.
-  Not yet moved to Redis.
+- Rate limits (login per account, login per IP, registration per IP) are shared through Redis when it is configured
+  (atomic Lua on a sorted set, using Redis's own clock), so they hold across gateway replicas. Account identifiers are hashed before
+  they reach Redis. If Redis is unreachable the limits degrade to per-process counters (N times higher with N replicas) until it returns.
 - Request bodies over 64 KiB are rejected by `Content-Length`; a reverse proxy should enforce the same for
   chunked uploads.
 
@@ -103,12 +108,28 @@ a normal login.
 * Statements are cancelled after `DB_STATEMENT_TIMEOUT_MS` (default 10 s). A request that waits that long
   for a lock fails with an error instead of holding a pooled connection indefinitely.
 
+## Market history, imports and housekeeping
+
+Candles and ATM snapshots are written by the leading ingestor. With `MARKET_HISTORY_BACKEND=sql` they live in the shared database, so a failover, a
+redeploy or a second ingestor all see the same history; the migration is `0002`. History writes never block the live feed: a failed write is logged and
+skipped, which leaves a gap in stored history (not in what live users see).
+
+```
+python -m src.db.import_legacy history       --sqlite data/market_data.db          # copy the old local history (safe to repeat)
+python -m src.db.import_legacy paper-trades  --sqlite data/market_data.db --email you@example.com
+python -m src.db.maintenance purge-history --keep-days 90      # delete whole past days outside the window; never today
+python -m src.db.maintenance purge-expired                     # old idempotency keys and refresh tokens
+python -m src.db.maintenance stats
+```
+
+A new leader restores today's completed candles from history and continues the previous leader's in-progress candle from what it last published, so a
+failover does not blank the chart.
+
 ## Known limits
 
-* Market history (candles, option-chain snapshots) still uses SQLite on the **ingestor's** disk, which is not
-  durable on an ephemeral container disk. In `gateway` mode it is reached through the control channel (so it
-  is served only while an ingestor leads). Moving it to PostgreSQL is the remaining persistence work.
-* In-progress candle state is held by the leading ingestor; a failover restarts the current candle.
+* Per-strike straddle candles for the *live* chart are rebuilt in memory by the leader; after a failover the live straddle series restarts (completed
+  candles are in history and show in the History page).
+* The in-progress candle is continued from the last published state; ticks the previous leader saw after its last publish are lost.
 * Paper P&L uses floating point, matching the existing simulation; fine for paper trading, not for real money.
-* The old `paper_trades` rows in a local SQLite file are global (no owner) and are not imported; there is no
-  per-user mapping for them.
+* Real data providers are deliberately disabled; everything has run on the mock feed.
+* Nothing in this repository has been run on a cloud provider; see [DEPLOYMENT.md](DEPLOYMENT.md#verified-and-not).

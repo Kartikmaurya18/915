@@ -1,0 +1,5 @@
+# Scripts and container files must keep LF endings or they break on Linux (CRLF in a shebang line).
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.yml text eol=lf
+*.conf text eol=lf

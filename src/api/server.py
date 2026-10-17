@@ -693,6 +693,7 @@ async def websocket_v1(websocket: WebSocket) -> None:
     rt_hub.max_clients_per_user = auth_settings.max_ws_connections_per_user()
     rejected = rt_hub.admit(user_id)
     if rejected is not None:
+        rt_metrics.clients_dropped.labels(rejected).inc()  # server_at_capacity | too_many_connections: visible to alerting
         await _close_ws(websocket, rt_protocol.CLOSE_CAPACITY, rejected)
         return
 

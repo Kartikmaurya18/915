@@ -374,3 +374,23 @@ def test_v1_works_without_auth_in_disabled_mode(monkeypatch):
             frame, _ = recv_until(ws, lambda f: f["type"] == "snapshot")
             assert frame["topic"] == "index:NIFTY"
         assert TestClient(server.app).get("/metrics").status_code == 200
+
+
+def test_connections_refused_for_capacity_are_counted_for_alerting(client, new_user, monkeypatch):
+    """The ConnectionCapacityRejections alert depends on this counter moving."""
+    from src.realtime import metrics
+
+    monkeypatch.setenv("WS_MAX_CONNECTIONS_PER_USER", "1")
+    _, headers = new_user()
+    before = metrics.clients_dropped.labels("too_many_connections")._value.get()
+    first = client.websocket_connect("/ws/v1")
+    ws1 = first.__enter__()
+    try:
+        ws1.send_text(auth_frame(headers))
+        recv_until(ws1, lambda f: f["type"] == "hello")
+        with client.websocket_connect("/ws/v1") as ws2:
+            ws2.send_text(auth_frame(headers))
+            expect_close(ws2, 4429)
+        assert metrics.clients_dropped.labels("too_many_connections")._value.get() == before + 1
+    finally:
+        first.__exit__(None, None, None)

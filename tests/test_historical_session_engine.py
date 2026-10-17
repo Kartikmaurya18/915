@@ -13,6 +13,7 @@ import pytest
 
 from src.engine import MarketEngine
 from src.models import Candle
+from src.market_calendar import is_trading_day as is_nse_trading_day
 from src.timeutil import IST, today_ist
 
 
@@ -44,7 +45,9 @@ def test_available_trading_dates_includes_today_after_live_ticks(tmp_path):
         engine.close()
 
     assert result["today"] == today_ist().isoformat()
-    assert today_ist().isoformat() in result["dates"]
+    # Persisted dates are filtered through the NSE calendar: a weekday with data is listed, but a weekend or
+    # holiday is not offered even when ticks were stored for it (the test used to assume a trading day).
+    assert (today_ist().isoformat() in result["dates"]) == is_nse_trading_day(today_ist())
 
 
 def test_historical_session_for_todays_date_has_data_after_live_ticks(tmp_path):
